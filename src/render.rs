@@ -8,6 +8,8 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::config::Colors;
+
 fn translate_color(color: vt100::Color) -> Option<Color> {
     match color {
         vt100::Color::Default => None,
@@ -69,6 +71,7 @@ pub fn render_pane(
     screen: &vt100::Screen,
     focused: bool,
     draw_border: bool,
+    colors: &Colors,
 ) {
     if !draw_border {
         render_screen(frame, rect, screen);
@@ -76,9 +79,9 @@ pub fn render_pane(
     }
 
     let border_style = if focused {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(colors.focused_border)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(colors.unfocused_border)
     };
     let block = Block::default().borders(Borders::ALL).border_style(border_style);
     let inner = block.inner(rect);
@@ -92,9 +95,18 @@ pub fn render_status_line(
     window_names: &[String],
     focused_idx: usize,
     kill_confirm_prompt: Option<&str>,
+    colors: &Colors,
 ) {
+    let mut style = Style::default();
+    if let Some(fg) = colors.status_fg {
+        style = style.fg(fg);
+    }
+    if let Some(bg) = colors.status_bg {
+        style = style.bg(bg);
+    }
+
     if let Some(text) = kill_confirm_prompt {
-        frame.render_widget(Paragraph::new(text), rect);
+        frame.render_widget(Paragraph::new(text).style(style), rect);
         return;
     }
 
@@ -110,7 +122,7 @@ pub fn render_status_line(
         })
         .collect::<Vec<_>>()
         .join("  ");
-    frame.render_widget(Paragraph::new(line), rect);
+    frame.render_widget(Paragraph::new(line).style(style), rect);
 }
 
 #[cfg(test)]
@@ -122,7 +134,8 @@ mod tests {
     use ratatui::style::{Color, Modifier};
     use ratatui::Terminal;
 
-    use super::render_screen;
+    use super::{render_pane, render_screen, render_status_line};
+    use crate::config::Colors;
 
     #[test]
     fn renders_plain_text_with_default_style() {
@@ -216,5 +229,46 @@ mod tests {
         for cell in buffer.content() {
             assert_ne!(cell.symbol(), "");
         }
+    }
+
+    #[test]
+    fn render_pane_uses_configured_focused_border_color() {
+        let parser = vt100::Parser::new(NonZeroU16::new(5).unwrap(), NonZeroU16::new(10).unwrap(), 0);
+        let colors = Colors {
+            focused_border: Color::Red,
+            ..Colors::default()
+        };
+
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_pane(frame, frame.area(), parser.screen(), true, true, &colors))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell = buffer.cell((0, 0)).unwrap();
+        assert_eq!(cell.fg, Color::Red);
+    }
+
+    #[test]
+    fn render_status_line_applies_configured_colors() {
+        let colors = Colors {
+            status_fg: Some(Color::White),
+            status_bg: Some(Color::Blue),
+            ..Colors::default()
+        };
+
+        let backend = TestBackend::new(10, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_status_line(frame, frame.area(), &["bash".to_string()], 0, None, &colors)
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let cell = buffer.cell((0, 0)).unwrap();
+        assert_eq!(cell.fg, Color::White);
+        assert_eq!(cell.bg, Color::Blue);
     }
 }

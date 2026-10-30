@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::config::KeyBindings;
+
 pub fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
     match key.code {
         KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c.is_ascii_alphabetic() => {
@@ -43,19 +45,29 @@ enum State {
 
 pub struct InputHandler {
     state: State,
+    bindings: KeyBindings,
 }
 
 impl InputHandler {
     pub fn new() -> InputHandler {
+        Self::with_config(KeyBindings::default())
+    }
+
+    pub fn with_config(bindings: KeyBindings) -> InputHandler {
         InputHandler {
             state: State::Normal,
+            bindings,
         }
+    }
+
+    fn is_prefix(&self, key: KeyEvent) -> bool {
+        key.code == self.bindings.prefix.code && key.modifiers.contains(self.bindings.prefix.modifiers)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         match self.state {
             State::Normal => {
-                if key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                if self.is_prefix(key) {
                     self.state = State::AwaitingPrefix;
                     Action::None
                 } else {
@@ -64,29 +76,27 @@ impl InputHandler {
             }
             State::AwaitingPrefix => {
                 self.state = State::Normal;
+                if self.is_prefix(key) {
+                    return Action::Forward(key_to_bytes(key));
+                }
                 match key.code {
-                    KeyCode::Char('c') => Action::NewWindow,
-                    KeyCode::Char('n') => Action::NextWindow,
-                    KeyCode::Char('p') => Action::PrevWindow,
                     KeyCode::Char(c) if c.is_ascii_digit() => {
                         Action::SelectWindow(c.to_digit(10).unwrap() as usize)
                     }
-                    KeyCode::Char('%') => Action::SplitHorizontal,
-                    KeyCode::Char('"') => Action::SplitVertical,
-                    KeyCode::Up => Action::FocusPane(crate::layout::PaneDirection::Up),
-                    KeyCode::Down => Action::FocusPane(crate::layout::PaneDirection::Down),
-                    KeyCode::Left => Action::FocusPane(crate::layout::PaneDirection::Left),
-                    KeyCode::Right => Action::FocusPane(crate::layout::PaneDirection::Right),
-                    KeyCode::Char('x') => {
+                    c if c == self.bindings.new_window => Action::NewWindow,
+                    c if c == self.bindings.next_window => Action::NextWindow,
+                    c if c == self.bindings.prev_window => Action::PrevWindow,
+                    c if c == self.bindings.split_horizontal => Action::SplitHorizontal,
+                    c if c == self.bindings.split_vertical => Action::SplitVertical,
+                    c if c == self.bindings.focus_up => Action::FocusPane(crate::layout::PaneDirection::Up),
+                    c if c == self.bindings.focus_down => Action::FocusPane(crate::layout::PaneDirection::Down),
+                    c if c == self.bindings.focus_left => Action::FocusPane(crate::layout::PaneDirection::Left),
+                    c if c == self.bindings.focus_right => Action::FocusPane(crate::layout::PaneDirection::Right),
+                    c if c == self.bindings.kill_pane => {
                         self.state = State::AwaitingKillConfirm;
                         Action::KillPane
                     }
-                    // tmux's `d` is detach-client; repurposed here as a full quit
-                    // since detach/reattach isn't implemented yet.
-                    KeyCode::Char('d') => Action::Quit,
-                    KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        Action::Forward(vec![0x02])
-                    }
+                    c if c == self.bindings.quit => Action::Quit,
                     _ => Action::None,
                 }
             }
@@ -345,5 +355,38 @@ mod tests {
             handler.handle_key(key),
             Action::Forward(key_to_bytes(key))
         );
+    }
+
+    fn custom_bindings() -> KeyBindings {
+        KeyBindings {
+            prefix: crate::config::KeySpec {
+                code: KeyCode::Char('a'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+            new_window: KeyCode::Char('z'),
+            ..KeyBindings::default()
+        }
+    }
+
+    fn ctrl_a() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn custom_prefix_replaces_default_ctrl_b() {
+        let mut handler = InputHandler::with_config(custom_bindings());
+        assert_eq!(
+            handler.handle_key(ctrl_b()),
+            Action::Forward(key_to_bytes(ctrl_b()))
+        );
+        assert_eq!(handler.handle_key(ctrl_a()), Action::None);
+        assert_eq!(handler.handle_key(plain('z')), Action::NewWindow);
+    }
+
+    #[test]
+    fn custom_prefix_repeat_forwards_configured_control_byte() {
+        let mut handler = InputHandler::with_config(custom_bindings());
+        assert_eq!(handler.handle_key(ctrl_a()), Action::None);
+        assert_eq!(handler.handle_key(ctrl_a()), Action::Forward(vec![0x01]));
     }
 }

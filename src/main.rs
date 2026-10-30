@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod input;
 mod layout;
 mod pane;
@@ -17,6 +18,8 @@ impl Drop for TerminalGuard {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = config::Config::load();
+
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
     let _guard = TerminalGuard;
@@ -33,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .split(full_area)[0];
     let mut app = app::App::new("claude", content_area)?;
 
-    let mut input_handler = input::InputHandler::new();
+    let mut input_handler = input::InputHandler::with_config(config.keybindings);
     let mut awaiting_kill_confirm = false;
 
     loop {
@@ -114,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for (id, rect) in &rects {
                 if let Some(pane) = window.pane(*id) {
                     let guard = pane.parser().lock().unwrap();
-                    render::render_pane(frame, *rect, guard.screen(), *id == focused_id, draw_border);
+                    render::render_pane(frame, *rect, guard.screen(), *id == focused_id, draw_border, &config.colors);
                 }
             }
 
@@ -124,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             };
-            render::render_status_line(frame, status_area, &names, focused_idx, prompt.as_deref());
+            render::render_status_line(frame, status_area, &names, focused_idx, prompt.as_deref(), &config.colors);
         })?;
     }
 
