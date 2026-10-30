@@ -1,10 +1,11 @@
+mod app;
 mod input;
+mod layout;
 mod pane;
 mod render;
+mod window;
 
-use pane::Pane;
-
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyEventKind};
 
 struct TerminalGuard;
 
@@ -24,45 +25,111 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = ratatui::Terminal::new(backend)?;
 
     let (cols, rows) = crossterm::terminal::size()?;
-    let mut pane = Pane::spawn("claude", (rows, cols))?;
+    let full_area = ratatui::layout::Rect { x: 0, y: 0, width: cols, height: rows };
+    let content_area = ratatui::layout::Layout::vertical([
+        ratatui::layout::Constraint::Min(0),
+        ratatui::layout::Constraint::Length(1),
+    ])
+    .split(full_area)[0];
+    let mut app = app::App::new("claude", content_area)?;
+
+    let mut input_handler = input::InputHandler::new();
+    let mut awaiting_kill_confirm = false;
 
     loop {
-        if pane.try_wait_exit()?.is_some() {
+        if app.reap_exited_panes()? {
             break;
         }
 
         if crossterm::event::poll(std::time::Duration::from_millis(33))? {
             match crossterm::event::read()? {
                 Event::Key(key) => {
-                    if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                        break;
-                    }
                     if key.kind == KeyEventKind::Press {
-                        let bytes = input::key_to_bytes(key);
-                        pane.write_input(&bytes)?;
+                        match input_handler.handle_key(key) {
+                            input::Action::Forward(bytes) => {
+                                app.focused_window_mut().write_to_focused(&bytes)?;
+                            }
+                            input::Action::NewWindow => {
+                                app.new_window()?;
+                            }
+                            input::Action::NextWindow => {
+                                app.next_window();
+                            }
+                            input::Action::PrevWindow => {
+                                app.prev_window();
+                            }
+                            input::Action::SelectWindow(n) => {
+                                app.select_window(n);
+                            }
+                            input::Action::SplitHorizontal => {
+                                app.focused_window_mut().split(layout::SplitDirection::Horizontal, "claude")?;
+                            }
+                            input::Action::SplitVertical => {
+                                app.focused_window_mut().split(layout::SplitDirection::Vertical, "claude")?;
+                            }
+                            input::Action::FocusPane(dir) => {
+                                app.focused_window_mut().focus_direction(dir);
+                            }
+                            input::Action::KillPane => {
+                                awaiting_kill_confirm = true;
+                            }
+                            input::Action::ConfirmKillPane => {
+                                awaiting_kill_confirm = false;
+                                if app.close_focused_pane()? {
+                                    break;
+                                }
+                            }
+                            input::Action::CancelKillPane => {
+                                awaiting_kill_confirm = false;
+                            }
+                            // tmux's real Ctrl-b d is detach-client. Detach/reattach isn't implemented yet
+                            // (single-process, deferred to a later milestone), so Ctrl-b d is repurposed here
+                            // as "quit mmux entirely, killing all panes" -- the closest available match to
+                            // tmux's semantics given that detach doesn't exist yet.
+                            input::Action::Quit => {
+                                break;
+                            }
+                            input::Action::None => {}
+                        }
                     }
                 }
                 Event::Resize(cols, rows) => {
-                    pane.resize(rows, cols)?;
+                    app.resize(ratatui::layout::Rect { x: 0, y: 0, width: cols, height: rows })?;
                 }
                 _ => {}
             }
         }
 
-        let guard = pane.parser().lock().unwrap();
-        let screen = guard.screen();
         terminal.draw(|frame| {
-            render::render_screen(frame, frame.area(), screen);
+            let status_area = ratatui::layout::Layout::vertical([
+                ratatui::layout::Constraint::Min(0),
+                ratatui::layout::Constraint::Length(1),
+            ])
+            .split(frame.area())[1];
+
+            let window = app.focused_window();
+            let rects = window.pane_rects();
+            let draw_border = rects.len() >= 2;
+            let focused_id = window.focused_id();
+            for (id, rect) in &rects {
+                if let Some(pane) = window.pane(*id) {
+                    let guard = pane.parser().lock().unwrap();
+                    render::render_pane(frame, *rect, guard.screen(), *id == focused_id, draw_border);
+                }
+            }
+
+            let (names, focused_idx) = app.window_names();
+            let prompt = if awaiting_kill_confirm {
+                Some(format!("kill-pane {}? (y/n)", focused_id))
+            } else {
+                None
+            };
+            render::render_status_line(frame, status_area, &names, focused_idx, prompt.as_deref());
         })?;
-        drop(guard);
     }
 
     drop(_guard);
-
-    if pane.try_wait_exit()?.is_none() {
-        let _ = pane.kill();
-    }
-    let _ = pane.wait();
+    app.kill_all()?;
 
     Ok(())
 }

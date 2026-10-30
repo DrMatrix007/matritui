@@ -6,6 +6,7 @@
 // would be unused overhead here.
 
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 fn translate_color(color: vt100::Color) -> Option<Color> {
     match color {
@@ -60,6 +61,56 @@ pub fn render_screen(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, sc
         let (cursor_row, cursor_col) = screen.cursor_position();
         frame.set_cursor_position((area.x + cursor_col, area.y + cursor_row));
     }
+}
+
+pub fn render_pane(
+    frame: &mut ratatui::Frame,
+    rect: ratatui::layout::Rect,
+    screen: &vt100::Screen,
+    focused: bool,
+    draw_border: bool,
+) {
+    if !draw_border {
+        render_screen(frame, rect, screen);
+        return;
+    }
+
+    let border_style = if focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::default().borders(Borders::ALL).border_style(border_style);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    render_screen(frame, inner, screen);
+}
+
+pub fn render_status_line(
+    frame: &mut ratatui::Frame,
+    rect: ratatui::layout::Rect,
+    window_names: &[String],
+    focused_idx: usize,
+    kill_confirm_prompt: Option<&str>,
+) {
+    if let Some(text) = kill_confirm_prompt {
+        frame.render_widget(Paragraph::new(text), rect);
+        return;
+    }
+
+    let line = window_names
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| {
+            if idx == focused_idx {
+                format!("{idx}:{name}*")
+            } else {
+                format!("{idx}:{name}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ");
+    frame.render_widget(Paragraph::new(line), rect);
 }
 
 #[cfg(test)]

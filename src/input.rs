@@ -17,6 +17,96 @@ pub fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    Forward(Vec<u8>),
+    NewWindow,
+    NextWindow,
+    PrevWindow,
+    SelectWindow(usize),
+    SplitHorizontal,
+    SplitVertical,
+    FocusPane(crate::layout::PaneDirection),
+    KillPane,
+    ConfirmKillPane,
+    CancelKillPane,
+    Quit,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+    Normal,
+    AwaitingPrefix,
+    AwaitingKillConfirm,
+}
+
+pub struct InputHandler {
+    state: State,
+}
+
+impl InputHandler {
+    pub fn new() -> InputHandler {
+        InputHandler {
+            state: State::Normal,
+        }
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> Action {
+        match self.state {
+            State::Normal => {
+                if key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.state = State::AwaitingPrefix;
+                    Action::None
+                } else {
+                    Action::Forward(key_to_bytes(key))
+                }
+            }
+            State::AwaitingPrefix => {
+                self.state = State::Normal;
+                match key.code {
+                    KeyCode::Char('c') => Action::NewWindow,
+                    KeyCode::Char('n') => Action::NextWindow,
+                    KeyCode::Char('p') => Action::PrevWindow,
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        Action::SelectWindow(c.to_digit(10).unwrap() as usize)
+                    }
+                    KeyCode::Char('%') => Action::SplitHorizontal,
+                    KeyCode::Char('"') => Action::SplitVertical,
+                    KeyCode::Up => Action::FocusPane(crate::layout::PaneDirection::Up),
+                    KeyCode::Down => Action::FocusPane(crate::layout::PaneDirection::Down),
+                    KeyCode::Left => Action::FocusPane(crate::layout::PaneDirection::Left),
+                    KeyCode::Right => Action::FocusPane(crate::layout::PaneDirection::Right),
+                    KeyCode::Char('x') => {
+                        self.state = State::AwaitingKillConfirm;
+                        Action::KillPane
+                    }
+                    // tmux's `d` is detach-client; repurposed here as a full quit
+                    // since detach/reattach isn't implemented yet.
+                    KeyCode::Char('d') => Action::Quit,
+                    KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Action::Forward(vec![0x02])
+                    }
+                    _ => Action::None,
+                }
+            }
+            State::AwaitingKillConfirm => {
+                self.state = State::Normal;
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => Action::ConfirmKillPane,
+                    _ => Action::CancelKillPane,
+                }
+            }
+        }
+    }
+}
+
+impl Default for InputHandler {
+    fn default() -> InputHandler {
+        InputHandler::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +176,174 @@ mod tests {
         assert_eq!(
             key_to_bytes(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)),
             vec![0x1a]
+        );
+    }
+
+    fn ctrl_b() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL)
+    }
+
+    fn plain(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn prefix_then_c_creates_new_window() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('c')), Action::NewWindow);
+    }
+
+    #[test]
+    fn prefix_then_n_selects_next_window() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('n')), Action::NextWindow);
+    }
+
+    #[test]
+    fn prefix_then_p_selects_prev_window() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('p')), Action::PrevWindow);
+    }
+
+    #[test]
+    fn prefix_then_digit_selects_window_by_index() {
+        for digit in 0..=9u32 {
+            let c = char::from_digit(digit, 10).unwrap();
+            let mut handler = InputHandler::new();
+            assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+            assert_eq!(
+                handler.handle_key(plain(c)),
+                Action::SelectWindow(digit as usize)
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_then_percent_splits_horizontal() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('%')), Action::SplitHorizontal);
+    }
+
+    #[test]
+    fn prefix_then_quote_splits_vertical() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('"')), Action::SplitVertical);
+    }
+
+    #[test]
+    fn prefix_then_up_focuses_pane_up() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(
+            handler.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            Action::FocusPane(crate::layout::PaneDirection::Up)
+        );
+    }
+
+    #[test]
+    fn prefix_then_down_focuses_pane_down() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(
+            handler.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Action::FocusPane(crate::layout::PaneDirection::Down)
+        );
+    }
+
+    #[test]
+    fn prefix_then_left_focuses_pane_left() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(
+            handler.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            Action::FocusPane(crate::layout::PaneDirection::Left)
+        );
+    }
+
+    #[test]
+    fn prefix_then_right_focuses_pane_right() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(
+            handler.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            Action::FocusPane(crate::layout::PaneDirection::Right)
+        );
+    }
+
+    #[test]
+    fn prefix_then_x_kills_pane() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('x')), Action::KillPane);
+    }
+
+    #[test]
+    fn prefix_then_d_quits() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('d')), Action::Quit);
+    }
+
+    #[test]
+    fn unbound_key_after_prefix_resets_to_normal() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('z')), Action::None);
+
+        let key = plain('a');
+        assert_eq!(
+            handler.handle_key(key),
+            Action::Forward(key_to_bytes(key))
+        );
+    }
+
+    #[test]
+    fn prefix_then_prefix_sends_literal_ctrl_b() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(ctrl_b()), Action::Forward(vec![0x02]));
+    }
+
+    #[test]
+    fn plain_key_with_no_prefix_forwards_unchanged() {
+        let mut handler = InputHandler::new();
+        let key = plain('a');
+        assert_eq!(
+            handler.handle_key(key),
+            Action::Forward(key_to_bytes(key))
+        );
+    }
+
+    #[test]
+    fn kill_confirm_y_confirms_kill_pane() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('x')), Action::KillPane);
+        assert_eq!(handler.handle_key(plain('y')), Action::ConfirmKillPane);
+
+        let key = plain('a');
+        assert_eq!(
+            handler.handle_key(key),
+            Action::Forward(key_to_bytes(key))
+        );
+    }
+
+    #[test]
+    fn kill_confirm_other_key_cancels_kill_pane() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('x')), Action::KillPane);
+        assert_eq!(handler.handle_key(plain('n')), Action::CancelKillPane);
+
+        let key = plain('a');
+        assert_eq!(
+            handler.handle_key(key),
+            Action::Forward(key_to_bytes(key))
         );
     }
 }
