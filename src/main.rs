@@ -7,9 +7,12 @@ mod ipc;
 mod layout;
 mod pane;
 mod render;
+mod state;
 mod window;
 
 use crossterm::event::{Event, KeyEventKind};
+
+const SIDEBAR_WIDTH: u16 = 40;
 
 struct TerminalGuard;
 
@@ -49,7 +52,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut input_handler = input::InputHandler::with_config(config.keybindings);
     let mut awaiting_kill_confirm = false;
-    let mut show_hook_overlay = false;
+    let mut show_sidebar = false;
+    let mut expanded_edit_rank: Option<usize> = None;
 
     loop {
         if app.reap_exited_panes()? {
@@ -63,10 +67,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if crossterm::event::poll(std::time::Duration::from_millis(33))? {
             match crossterm::event::read()? {
                 Event::Key(key) => {
-                    if key.kind == KeyEventKind::Press && key.code == crossterm::event::KeyCode::F(12) {
-                        show_hook_overlay = !show_hook_overlay;
-                        continue;
-                    }
                     if key.kind == KeyEventKind::Press {
                         match input_handler.handle_key(key) {
                             input::Action::Forward(bytes) => {
@@ -105,6 +105,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             input::Action::CancelKillPane => {
                                 awaiting_kill_confirm = false;
                             }
+                            input::Action::ToggleSidebar => {
+                                show_sidebar = !show_sidebar;
+                                expanded_edit_rank = None;
+                                let (cols, rows) = crossterm::terminal::size()?;
+                                let full_area = ratatui::layout::Rect { x: 0, y: 0, width: cols, height: rows };
+                                app.resize(full_area, if show_sidebar { SIDEBAR_WIDTH } else { 0 })?;
+                            }
+                            input::Action::ExpandNextEdit => {
+                                if show_sidebar
+                                    && let Some(pane) = app.focused_window().pane(app.focused_window().focused_id())
+                                {
+                                    let len = app.pane_state(pane.hook_id()).edit_timeline.len();
+                                    if len > 0 {
+                                        expanded_edit_rank = match expanded_edit_rank {
+                                            None => Some(0),
+                                            Some(r) if r + 1 >= len => None,
+                                            Some(r) => Some(r + 1),
+                                        };
+                                    }
+                                }
+                            }
                             // tmux's real Ctrl-b d is detach-client. Detach/reattach isn't implemented yet
                             // (single-process, deferred to a later milestone), so Ctrl-b d is repurposed here
                             // as "quit mmux entirely, killing all panes" -- the closest available match to
@@ -117,18 +138,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Event::Resize(cols, rows) => {
-                    app.resize(ratatui::layout::Rect { x: 0, y: 0, width: cols, height: rows })?;
+                    app.resize(
+                        ratatui::layout::Rect { x: 0, y: 0, width: cols, height: rows },
+                        if show_sidebar { SIDEBAR_WIDTH } else { 0 },
+                    )?;
                 }
                 _ => {}
             }
         }
 
         terminal.draw(|frame| {
+            let (left_area, sidebar_rect) =
+                app::split_for_sidebar(frame.area(), if show_sidebar { SIDEBAR_WIDTH } else { 0 });
             let status_area = ratatui::layout::Layout::vertical([
                 ratatui::layout::Constraint::Min(0),
                 ratatui::layout::Constraint::Length(1),
             ])
-            .split(frame.area())[1];
+            .split(left_area)[1];
 
             let window = app.focused_window();
             let rects = window.pane_rects();
@@ -149,10 +175,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             render::render_status_line(frame, status_area, &names, focused_idx, prompt.as_deref(), &config.colors);
 
-            if show_hook_overlay
+            if show_sidebar
                 && let Some(pane) = window.pane(focused_id)
             {
-                render::render_hook_log_overlay(frame, frame.area(), app.event_log().events_for(pane.hook_id()));
+                render::render_sidebar(frame, sidebar_rect, app.pane_state(pane.hook_id()), expanded_edit_rank);
             }
         })?;
     }

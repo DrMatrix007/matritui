@@ -52,6 +52,8 @@ pub struct KeyBindings {
     pub focus_right: KeyCode,
     pub kill_pane: KeyCode,
     pub quit: KeyCode,
+    pub toggle_sidebar: KeyCode,
+    pub expand_edit: KeyCode,
 }
 
 impl Default for KeyBindings {
@@ -69,6 +71,8 @@ impl Default for KeyBindings {
             focus_right: KeyCode::Right,
             kill_pane: KeyCode::Char('x'),
             quit: KeyCode::Char('d'),
+            toggle_sidebar: KeyCode::Char('s'),
+            expand_edit: KeyCode::Char('e'),
         }
     }
 }
@@ -118,6 +122,8 @@ struct RawKeyBindings {
     focus_right: Option<String>,
     kill_pane: Option<String>,
     quit: Option<String>,
+    toggle_sidebar: Option<String>,
+    expand_edit: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -177,6 +183,8 @@ impl Config {
             apply_key!(focus_right);
             apply_key!(kill_pane);
             apply_key!(quit);
+            apply_key!(toggle_sidebar);
+            apply_key!(expand_edit);
         }
 
         if let Some(raw_colors) = &raw.colors {
@@ -249,6 +257,8 @@ mod tests {
         assert_eq!(config.keybindings.focus_right, KeyCode::Right);
         assert_eq!(config.keybindings.kill_pane, KeyCode::Char('x'));
         assert_eq!(config.keybindings.quit, KeyCode::Char('d'));
+        assert_eq!(config.keybindings.toggle_sidebar, KeyCode::Char('s'));
+        assert_eq!(config.keybindings.expand_edit, KeyCode::Char('e'));
 
         assert_eq!(config.colors.focused_border, Color::Yellow);
         assert_eq!(config.colors.unfocused_border, Color::DarkGray);
@@ -329,6 +339,8 @@ focus_left = "Left"
 focus_right = "Right"
 kill_pane = "x"
 quit = "d"
+toggle_sidebar = "s"
+expand_edit = "e"
 
 [colors]
 focused_border = "yellow"
@@ -340,6 +352,8 @@ status_bg = "blue"
         assert_eq!(config.keybindings.prefix, Config::default().keybindings.prefix);
         assert_eq!(config.keybindings.new_window, KeyCode::Char('c'));
         assert_eq!(config.keybindings.quit, KeyCode::Char('d'));
+        assert_eq!(config.keybindings.toggle_sidebar, KeyCode::Char('s'));
+        assert_eq!(config.keybindings.expand_edit, KeyCode::Char('e'));
         assert_eq!(config.colors.focused_border, Color::Yellow);
         assert_eq!(config.colors.unfocused_border, Color::DarkGray);
         assert_eq!(config.colors.status_fg, Some(Color::White));

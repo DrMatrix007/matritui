@@ -5,11 +5,13 @@
 // toolkit, with a much larger footprint and its own terminal/widget concepts that
 // would be unused overhead here.
 
+use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::config::Colors;
-use crate::ipc;
+use crate::state::{PaneState, PaneStatus, SubagentNode};
 
 fn translate_color(color: vt100::Color) -> Option<Color> {
     match color {
@@ -126,24 +128,78 @@ pub fn render_status_line(
     frame.render_widget(Paragraph::new(line).style(style), rect);
 }
 
-pub fn render_hook_log_overlay(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, events: &[ipc::HookEvent]) {
-    let lines: Vec<String> = events
-        .iter()
-        .map(|e| {
-            let name = e.event.get("hook_event_name").and_then(|v| v.as_str()).unwrap_or("?");
-            let snippet = e.event.to_string();
-            let snippet: String = if snippet.chars().count() > 80 {
-                format!("{}...", snippet.chars().take(80).collect::<String>())
-            } else {
-                snippet
+fn push_subagent_tree_lines(lines: &mut Vec<String>, node: &SubagentNode, depth: usize) {
+    let indent = "  ".repeat(depth);
+    let marker = if node.active { "▸" } else { "✓" };
+    let mut line = format!("{indent}{marker} {}", node.agent_type);
+    if let Some(description) = &node.description {
+        line.push_str(&format!(": \"{description}\""));
+    }
+    if let Some(tool) = &node.current_tool {
+        line.push_str(&format!(" [running: {tool}]"));
+    }
+    lines.push(line);
+    for child in &node.children {
+        push_subagent_tree_lines(lines, child, depth + 1);
+    }
+}
+
+fn diff_lines(before: &str, after: &str) -> Vec<Line<'static>> {
+    let diff = similar::TextDiff::from_lines(before, after);
+    diff.iter_all_changes()
+        .map(|change| {
+            let (prefix, style) = match change.tag() {
+                similar::ChangeTag::Insert => ("+", Style::default().fg(Color::Green)),
+                similar::ChangeTag::Delete => ("-", Style::default().fg(Color::Red)),
+                similar::ChangeTag::Equal => (" ", Style::default()),
             };
-            format!("{name}: {snippet}")
+            let text = format!("{prefix}{}", change.as_str().unwrap_or_default().trim_end_matches('\n'));
+            Line::from(Span::styled(text, style))
         })
-        .collect();
-    let block = Block::default().borders(Borders::ALL).title("hook events");
+        .collect()
+}
+
+// `expanded_rank` is newest-first: rank 0 is the most recently pushed entry (the
+// last element of `edit_timeline`), rank 1 the one before it, and so on.
+pub fn render_sidebar(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    pane_state: &PaneState,
+    expanded_rank: Option<usize>,
+) {
+    let block = Block::default().borders(Borders::ALL).title("sidebar");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(lines.join("\n")), inner);
+
+    let [tree_area, timeline_area] =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(inner);
+
+    let status_line = match pane_state.status() {
+        PaneStatus::Idle => "Status: idle".to_string(),
+        PaneStatus::RunningTool(name) => format!("Status: running tool \"{name}\""),
+        PaneStatus::RunningSubagent(label) => format!("Status: running subagent \"{label}\""),
+    };
+
+    let mut tree_lines = Vec::new();
+    for node in &pane_state.root_subagents {
+        push_subagent_tree_lines(&mut tree_lines, node, 0);
+    }
+    let tree_text = format!("{status_line}\n\n{}", tree_lines.join("\n"));
+    frame.render_widget(Paragraph::new(tree_text), tree_area);
+
+    let mut timeline_lines: Vec<Line> = Vec::new();
+    for (rank, entry) in pane_state.edit_timeline.iter().rev().enumerate() {
+        if expanded_rank == Some(rank) {
+            timeline_lines.push(Line::from(entry.file_path.clone()));
+            timeline_lines.extend(diff_lines(entry.before.as_deref().unwrap_or(""), &entry.after));
+        } else {
+            timeline_lines.push(Line::from(format!(
+                "{}  +{}/-{}",
+                entry.file_path, entry.added, entry.removed
+            )));
+        }
+    }
+    frame.render_widget(Paragraph::new(timeline_lines), timeline_area);
 }
 
 #[cfg(test)]
@@ -155,8 +211,10 @@ mod tests {
     use ratatui::style::{Color, Modifier};
     use ratatui::Terminal;
 
-    use super::{render_pane, render_screen, render_status_line};
+    use super::{render_pane, render_screen, render_sidebar, render_status_line};
     use crate::config::Colors;
+    use crate::ipc::HookEvent;
+    use crate::state::{EditEntry, PaneState, StateEngine};
 
     #[test]
     fn renders_plain_text_with_default_style() {
@@ -291,5 +349,103 @@ mod tests {
         let cell = buffer.cell((0, 0)).unwrap();
         assert_eq!(cell.fg, Color::White);
         assert_eq!(cell.bg, Color::Blue);
+    }
+
+    #[test]
+    fn render_sidebar_shows_compact_edit_stat_line() {
+        let mut pane_state = PaneState::default();
+        pane_state.edit_timeline.push(EditEntry {
+            file_path: "foo.rs".to_string(),
+            before: Some("a\n".to_string()),
+            after: "b\n".to_string(),
+            added: 1,
+            removed: 1,
+        });
+
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(frame, frame.area(), &pane_state, None))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..20 {
+            for x in 0..40 {
+                text.push_str(buffer.cell((x, y)).unwrap().symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(text.contains("foo.rs"));
+        assert!(text.contains("+1/-1"));
+    }
+
+    #[test]
+    fn render_sidebar_shows_running_tool_status() {
+        let mut engine = StateEngine::default();
+        engine.record(&HookEvent {
+            pane_id: "pane1".to_string(),
+            event: serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_use_id": "t1"
+            }),
+        });
+        let pane_state = engine.state_for("pane1");
+
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(frame, frame.area(), pane_state, None))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..20 {
+            for x in 0..40 {
+                text.push_str(buffer.cell((x, y)).unwrap().symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(text.contains("Bash"));
+        assert!(text.contains("running"));
+    }
+
+    #[test]
+    fn render_sidebar_expanding_entry_shows_diff_lines() {
+        let mut pane_state = PaneState::default();
+        pane_state.edit_timeline.push(EditEntry {
+            file_path: "foo.rs".to_string(),
+            before: Some("a\n".to_string()),
+            after: "b\n".to_string(),
+            added: 1,
+            removed: 1,
+        });
+
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(frame, frame.area(), &pane_state, Some(0)))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut lines = Vec::new();
+        for y in 0..20 {
+            let mut line = String::new();
+            for x in 0..40 {
+                line.push_str(buffer.cell((x, y)).unwrap().symbol());
+            }
+            lines.push(line);
+        }
+
+        let inner_lines: Vec<&str> = lines
+            .iter()
+            .map(|l| l.trim_matches(|c: char| c == '│' || c == '┌' || c == '┐' || c == '└' || c == '┘' || c == '─'))
+            .collect();
+
+        assert!(inner_lines.iter().any(|l| l.trim_start().starts_with('+')));
+        assert!(inner_lines.iter().any(|l| l.trim_start().starts_with('-')));
     }
 }

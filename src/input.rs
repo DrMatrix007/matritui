@@ -33,6 +33,8 @@ pub enum Action {
     ConfirmKillPane,
     CancelKillPane,
     Quit,
+    ToggleSidebar,
+    ExpandNextEdit,
     None,
 }
 
@@ -97,6 +99,8 @@ impl InputHandler {
                         Action::KillPane
                     }
                     c if c == self.bindings.quit => Action::Quit,
+                    c if c == self.bindings.toggle_sidebar => Action::ToggleSidebar,
+                    c if c == self.bindings.expand_edit => Action::ExpandNextEdit,
                     _ => Action::None,
                 }
             }
@@ -297,6 +301,20 @@ mod tests {
         let mut handler = InputHandler::new();
         assert_eq!(handler.handle_key(ctrl_b()), Action::None);
         assert_eq!(handler.handle_key(plain('d')), Action::Quit);
+    }
+
+    #[test]
+    fn prefix_then_s_toggles_sidebar() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('s')), Action::ToggleSidebar);
+    }
+
+    #[test]
+    fn prefix_then_e_expands_next_edit() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('e')), Action::ExpandNextEdit);
     }
 
     #[test]

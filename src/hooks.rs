@@ -1,9 +1,6 @@
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ipc;
-
-const MAX_EVENTS_PER_PANE: usize = 200;
 
 static NEXT_HOOK_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -52,35 +49,9 @@ pub fn pane_launch_extras(hook_id: &str, settings_path: &std::path::Path) -> (Ve
     (env, args)
 }
 
-#[derive(Default)]
-pub struct EventLog {
-    by_pane: HashMap<String, Vec<ipc::HookEvent>>,
-}
-
-impl EventLog {
-    pub fn record(&mut self, event: ipc::HookEvent) {
-        let events = self.by_pane.entry(event.pane_id.clone()).or_default();
-        if events.len() >= MAX_EVENTS_PER_PANE {
-            events.remove(0);
-        }
-        events.push(event);
-    }
-
-    pub fn events_for(&self, pane_id: &str) -> &[ipc::HookEvent] {
-        self.by_pane.get(pane_id).map(Vec::as_slice).unwrap_or(&[])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_event(pane_id: &str, n: usize) -> ipc::HookEvent {
-        ipc::HookEvent {
-            pane_id: pane_id.to_string(),
-            event: serde_json::json!({ "n": n }),
-        }
-    }
 
     #[test]
     fn next_hook_id_generates_distinct_ids() {
@@ -132,43 +103,5 @@ mod tests {
             ]
         );
         assert_eq!(args, vec!["--settings".to_string(), settings_path.to_string_lossy().into_owned()]);
-    }
-
-    #[test]
-    fn event_log_isolates_and_orders_events_per_pane() {
-        let mut log = EventLog::default();
-
-        log.record(test_event("pane-a", 0));
-        log.record(test_event("pane-b", 0));
-        log.record(test_event("pane-a", 1));
-        log.record(test_event("pane-b", 1));
-        log.record(test_event("pane-a", 2));
-
-        let a_events = log.events_for("pane-a");
-        assert_eq!(a_events.len(), 3);
-        assert_eq!(a_events[0].event, serde_json::json!({ "n": 0 }));
-        assert_eq!(a_events[1].event, serde_json::json!({ "n": 1 }));
-        assert_eq!(a_events[2].event, serde_json::json!({ "n": 2 }));
-
-        let b_events = log.events_for("pane-b");
-        assert_eq!(b_events.len(), 2);
-        assert_eq!(b_events[0].event, serde_json::json!({ "n": 0 }));
-        assert_eq!(b_events[1].event, serde_json::json!({ "n": 1 }));
-
-        assert!(log.events_for("unknown-pane").is_empty());
-    }
-
-    #[test]
-    fn event_log_caps_events_per_pane_and_evicts_oldest() {
-        let mut log = EventLog::default();
-
-        for n in 0..250 {
-            log.record(test_event("pane-cap", n));
-        }
-
-        let events = log.events_for("pane-cap");
-        assert_eq!(events.len(), MAX_EVENTS_PER_PANE);
-        assert_ne!(events[0].event, serde_json::json!({ "n": 0 }));
-        assert_eq!(events[events.len() - 1].event, serde_json::json!({ "n": 249 }));
     }
 }

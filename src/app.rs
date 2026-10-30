@@ -2,8 +2,8 @@ use std::io;
 
 use ratatui::layout::{Constraint, Layout, Rect};
 
-use crate::hooks;
 use crate::ipc;
+use crate::state;
 use crate::window::Window;
 
 fn clamp_min_size(mut r: Rect) -> Rect {
@@ -17,7 +17,7 @@ pub struct App {
     focused_window: usize,
     content_rect: Rect,
     cmd: String,
-    event_log: hooks::EventLog,
+    pane_states: state::StateEngine,
 }
 
 impl App {
@@ -29,7 +29,7 @@ impl App {
             focused_window: 0,
             content_rect: area,
             cmd: cmd.to_string(),
-            event_log: hooks::EventLog::default(),
+            pane_states: state::StateEngine::default(),
         })
     }
 
@@ -54,8 +54,9 @@ impl App {
         }
     }
 
-    pub fn resize(&mut self, full_area: Rect) -> io::Result<()> {
-        let areas = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(full_area);
+    pub fn resize(&mut self, full_area: Rect, sidebar_width: u16) -> io::Result<()> {
+        let (left_area, _sidebar_area) = split_for_sidebar(full_area, sidebar_width);
+        let areas = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(left_area);
         self.content_rect = clamp_min_size(areas[0]);
         for window in &mut self.windows {
             window.resize(self.content_rect)?;
@@ -115,12 +116,17 @@ impl App {
     }
 
     pub fn record_hook_event(&mut self, event: ipc::HookEvent) {
-        self.event_log.record(event);
+        self.pane_states.record(&event);
     }
 
-    pub fn event_log(&self) -> &hooks::EventLog {
-        &self.event_log
+    pub fn pane_state(&self, pane_id: &str) -> &state::PaneState {
+        self.pane_states.state_for(pane_id)
     }
+}
+
+pub fn split_for_sidebar(full_area: Rect, sidebar_width: u16) -> (Rect, Rect) {
+    let areas = Layout::horizontal([Constraint::Min(0), Constraint::Length(sidebar_width)]).split(full_area);
+    (areas[0], areas[1])
 }
 
 #[cfg(test)]
@@ -226,11 +232,51 @@ mod tests {
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(new_full_area);
         let expected_content_rect = expected_areas[0];
 
-        app.resize(new_full_area).unwrap();
+        app.resize(new_full_area, 0).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         assert_eq!(app.content_rect, expected_content_rect);
         assert_ne!(app.content_rect, initial);
+
+        let window = app.focused_window();
+        let pane = window.pane(window.focused_id()).unwrap();
+        let (rows, cols) = pane.parser().lock().unwrap().screen().size();
+        assert_eq!(rows, std::num::NonZeroU16::new(expected_content_rect.height).unwrap());
+        assert_eq!(cols, std::num::NonZeroU16::new(expected_content_rect.width).unwrap());
+
+        app.kill_all().unwrap();
+    }
+
+    #[test]
+    fn resize_with_sidebar_width_narrows_content_rect() {
+        let initial = test_area();
+        let mut app = App::new("cat", initial).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let new_full_area = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 40,
+        };
+        let sidebar_width = 40;
+
+        let (left_area, _sidebar_area) = split_for_sidebar(new_full_area, sidebar_width);
+        let expected_areas = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(left_area);
+        let expected_content_rect = expected_areas[0];
+
+        let no_sidebar_areas =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(new_full_area);
+        let no_sidebar_content_rect = no_sidebar_areas[0];
+
+        app.resize(new_full_area, sidebar_width).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert_eq!(app.content_rect, expected_content_rect);
+        assert!(
+            app.content_rect.width < no_sidebar_content_rect.width,
+            "content rect should be narrower when a sidebar is reserved"
+        );
 
         let window = app.focused_window();
         let pane = window.pane(window.focused_id()).unwrap();
