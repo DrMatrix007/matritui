@@ -1,8 +1,10 @@
 use std::io;
+use std::path::PathBuf;
 
 use ratatui::layout::{Constraint, Layout, Rect};
 
 use crate::ipc;
+use crate::layout;
 use crate::state;
 use crate::window::Window;
 
@@ -122,6 +124,38 @@ impl App {
     pub fn pane_state(&self, pane_id: &str) -> &state::PaneState {
         self.pane_states.state_for(pane_id)
     }
+
+    pub fn overview_entries(&self) -> Vec<OverviewEntry> {
+        let mut entries = Vec::new();
+        for (window_idx, window) in self.windows.iter().enumerate() {
+            for (pane_id, _rect) in window.pane_rects() {
+                if let Some(pane) = window.pane(pane_id) {
+                    entries.push(OverviewEntry {
+                        window_idx,
+                        pane_id,
+                        cwd: pane.cwd().to_path_buf(),
+                        status: self.pane_states.state_for(pane.hook_id()).status(),
+                    });
+                }
+            }
+        }
+        entries.sort_by(|a, b| (&a.cwd, a.window_idx, a.pane_id).cmp(&(&b.cwd, b.window_idx, b.pane_id)));
+        entries
+    }
+
+    pub fn focus_pane(&mut self, window_idx: usize, pane_id: layout::PaneId) {
+        if window_idx < self.windows.len() {
+            self.focused_window = window_idx;
+            self.windows[window_idx].focus_pane(pane_id);
+        }
+    }
+}
+
+pub struct OverviewEntry {
+    pub window_idx: usize,
+    pub pane_id: layout::PaneId,
+    pub cwd: PathBuf,
+    pub status: state::PaneStatus,
 }
 
 pub fn split_for_sidebar(full_area: Rect, sidebar_width: u16) -> (Rect, Rect) {
@@ -283,6 +317,75 @@ mod tests {
         let (rows, cols) = pane.parser().lock().unwrap().screen().size();
         assert_eq!(rows, std::num::NonZeroU16::new(expected_content_rect.height).unwrap());
         assert_eq!(cols, std::num::NonZeroU16::new(expected_content_rect.width).unwrap());
+
+        app.kill_all().unwrap();
+    }
+
+    #[test]
+    fn overview_entries_includes_every_pane_with_cwd_and_status() {
+        let mut app = App::new("cat", test_area()).unwrap();
+        app.new_window().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let entries = app.overview_entries();
+
+        assert_eq!(entries.len(), 2);
+        let cwd = std::env::current_dir().unwrap();
+        for entry in &entries {
+            assert_eq!(entry.cwd, cwd);
+            assert!(matches!(entry.status, state::PaneStatus::Idle));
+        }
+        let pairs: Vec<(usize, layout::PaneId)> =
+            entries.iter().map(|e| (e.window_idx, e.pane_id)).collect();
+        assert!(pairs.contains(&(0, 0)));
+        assert!(pairs.contains(&(1, 0)));
+
+        app.kill_all().unwrap();
+    }
+
+    #[test]
+    fn overview_entries_sorted_by_window_then_pane() {
+        let mut app = App::new("cat", test_area()).unwrap();
+        app.new_window().unwrap();
+        app.new_window().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let entries = app.overview_entries();
+        let window_idxs: Vec<usize> = entries.iter().map(|e| e.window_idx).collect();
+        let mut sorted = window_idxs.clone();
+        sorted.sort();
+        assert_eq!(window_idxs, sorted);
+
+        app.kill_all().unwrap();
+    }
+
+    #[test]
+    fn focus_pane_switches_focused_window_and_pane() {
+        let mut app = App::new("cat", test_area()).unwrap();
+        app.new_window().unwrap();
+        app.focused_window_mut().split(layout::SplitDirection::Horizontal, "cat").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        app.select_window(0);
+        assert_eq!(app.focused_window, 0);
+
+        app.focus_pane(1, 1);
+
+        assert_eq!(app.focused_window, 1);
+        assert_eq!(app.focused_window().focused_id(), 1);
+
+        app.kill_all().unwrap();
+    }
+
+    #[test]
+    fn focus_pane_ignores_out_of_range_window_index() {
+        let mut app = App::new("cat", test_area()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        app.focus_pane(99, 0);
+
+        assert_eq!(app.focused_window, 0);
+        assert_eq!(app.focused_window().focused_id(), 0);
 
         app.kill_all().unwrap();
     }

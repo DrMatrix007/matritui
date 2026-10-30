@@ -54,6 +54,7 @@ pub struct KeyBindings {
     pub quit: KeyCode,
     pub toggle_sidebar: KeyCode,
     pub expand_edit: KeyCode,
+    pub toggle_overview: KeyCode,
 }
 
 impl Default for KeyBindings {
@@ -73,6 +74,7 @@ impl Default for KeyBindings {
             quit: KeyCode::Char('d'),
             toggle_sidebar: KeyCode::Char('s'),
             expand_edit: KeyCode::Char('e'),
+            toggle_overview: KeyCode::Char('o'),
         }
     }
 }
@@ -124,6 +126,7 @@ struct RawKeyBindings {
     quit: Option<String>,
     toggle_sidebar: Option<String>,
     expand_edit: Option<String>,
+    toggle_overview: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -185,6 +188,7 @@ impl Config {
             apply_key!(quit);
             apply_key!(toggle_sidebar);
             apply_key!(expand_edit);
+            apply_key!(toggle_overview);
         }
 
         if let Some(raw_colors) = &raw.colors {
@@ -259,6 +263,7 @@ mod tests {
         assert_eq!(config.keybindings.quit, KeyCode::Char('d'));
         assert_eq!(config.keybindings.toggle_sidebar, KeyCode::Char('s'));
         assert_eq!(config.keybindings.expand_edit, KeyCode::Char('e'));
+        assert_eq!(config.keybindings.toggle_overview, KeyCode::Char('o'));
 
         assert_eq!(config.colors.focused_border, Color::Yellow);
         assert_eq!(config.colors.unfocused_border, Color::DarkGray);
@@ -274,6 +279,15 @@ mod tests {
         assert_eq!(config.keybindings.next_window, default.keybindings.next_window);
         assert_eq!(config.keybindings.prev_window, default.keybindings.prev_window);
         assert_eq!(config.keybindings.prefix, default.keybindings.prefix);
+    }
+
+    #[test]
+    fn partial_override_for_toggle_overview_only_changes_that_field() {
+        let config = Config::from_toml_str("[keybindings]\ntoggle_overview = \"v\"\n");
+        let default = Config::default();
+        assert_eq!(config.keybindings.toggle_overview, KeyCode::Char('v'));
+        assert_eq!(config.keybindings.toggle_sidebar, default.keybindings.toggle_sidebar);
+        assert_eq!(config.keybindings.new_window, default.keybindings.new_window);
     }
 
     #[test]
@@ -341,6 +355,7 @@ kill_pane = "x"
 quit = "d"
 toggle_sidebar = "s"
 expand_edit = "e"
+toggle_overview = "o"
 
 [colors]
 focused_border = "yellow"
@@ -354,6 +369,7 @@ status_bg = "blue"
         assert_eq!(config.keybindings.quit, KeyCode::Char('d'));
         assert_eq!(config.keybindings.toggle_sidebar, KeyCode::Char('s'));
         assert_eq!(config.keybindings.expand_edit, KeyCode::Char('e'));
+        assert_eq!(config.keybindings.toggle_overview, KeyCode::Char('o'));
         assert_eq!(config.colors.focused_border, Color::Yellow);
         assert_eq!(config.colors.unfocused_border, Color::DarkGray);
         assert_eq!(config.colors.status_fg, Some(Color::White));

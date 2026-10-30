@@ -167,6 +167,12 @@ impl Window {
     pub fn pane(&self, id: layout::PaneId) -> Option<&pane::Pane> {
         self.panes.get(&id)
     }
+
+    pub fn focus_pane(&mut self, id: layout::PaneId) {
+        if self.panes.contains_key(&id) {
+            self.focused = id;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -257,5 +263,32 @@ mod tests {
 
         assert!(result);
         assert!(window.is_empty());
+    }
+
+    #[test]
+    fn focus_pane_moves_focus_to_existing_pane_id() {
+        let area = test_area();
+        let mut window = Window::new("cat", area).unwrap();
+        window.split(layout::SplitDirection::Horizontal, "cat").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert_eq!(window.focused, 1);
+
+        window.focus_pane(0);
+        assert_eq!(window.focused, 0);
+
+        window.kill_all().unwrap();
+    }
+
+    #[test]
+    fn focus_pane_ignores_unknown_pane_id() {
+        let area = test_area();
+        let mut window = Window::new("cat", area).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        window.focus_pane(99);
+        assert_eq!(window.focused, 0);
+
+        window.kill_all().unwrap();
     }
 }

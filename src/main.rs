@@ -54,6 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut awaiting_kill_confirm = false;
     let mut show_sidebar = false;
     let mut expanded_edit_rank: Option<usize> = None;
+    let mut show_overview = false;
+    let mut overview_selected: usize = 0;
 
     loop {
         if app.reap_exited_panes()? {
@@ -126,6 +128,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             }
+                            input::Action::ToggleOverview => {
+                                show_overview = !show_overview;
+                                overview_selected = 0;
+                            }
+                            input::Action::OverviewUp => {
+                                overview_selected = overview_selected.saturating_sub(1);
+                            }
+                            input::Action::OverviewDown => {
+                                let len = app.overview_entries().len();
+                                if overview_selected + 1 < len {
+                                    overview_selected += 1;
+                                }
+                            }
+                            input::Action::OverviewSelect => {
+                                if let Some(entry) = app.overview_entries().get(overview_selected) {
+                                    app.focus_pane(entry.window_idx, entry.pane_id);
+                                }
+                                show_overview = false;
+                            }
                             // tmux's real Ctrl-b d is detach-client. Detach/reattach isn't implemented yet
                             // (single-process, deferred to a later milestone), so Ctrl-b d is repurposed here
                             // as "quit mmux entirely, killing all panes" -- the closest available match to
@@ -148,6 +169,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         terminal.draw(|frame| {
+            if show_overview {
+                let entries = app.overview_entries();
+                render::render_overview(frame, frame.area(), &entries, overview_selected);
+                return;
+            }
+
             let (left_area, sidebar_rect) =
                 app::split_for_sidebar(frame.area(), if show_sidebar { SIDEBAR_WIDTH } else { 0 });
             let status_area = ratatui::layout::Layout::vertical([

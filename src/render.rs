@@ -10,6 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::app::OverviewEntry;
 use crate::config::Colors;
 use crate::state::{PaneState, PaneStatus, SubagentNode};
 
@@ -128,6 +129,14 @@ pub fn render_status_line(
     frame.render_widget(Paragraph::new(line).style(style), rect);
 }
 
+fn status_description(status: &PaneStatus) -> String {
+    match status {
+        PaneStatus::Idle => "idle".to_string(),
+        PaneStatus::RunningTool(name) => format!("running tool \"{name}\""),
+        PaneStatus::RunningSubagent(label) => format!("running subagent \"{label}\""),
+    }
+}
+
 fn push_subagent_tree_lines(lines: &mut Vec<String>, node: &SubagentNode, depth: usize) {
     let indent = "  ".repeat(depth);
     let marker = if node.active { "▸" } else { "✓" };
@@ -174,11 +183,7 @@ pub fn render_sidebar(
     let [tree_area, timeline_area] =
         Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(inner);
 
-    let status_line = match pane_state.status() {
-        PaneStatus::Idle => "Status: idle".to_string(),
-        PaneStatus::RunningTool(name) => format!("Status: running tool \"{name}\""),
-        PaneStatus::RunningSubagent(label) => format!("Status: running subagent \"{label}\""),
-    };
+    let status_line = format!("Status: {}", status_description(&pane_state.status()));
 
     let mut tree_lines = Vec::new();
     for node in &pane_state.root_subagents {
@@ -202,6 +207,41 @@ pub fn render_sidebar(
     frame.render_widget(Paragraph::new(timeline_lines), timeline_area);
 }
 
+pub fn render_overview(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    entries: &[OverviewEntry],
+    selected: usize,
+) {
+    let block = Block::default().borders(Borders::ALL).title("overview");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let selected = selected.min(entries.len().saturating_sub(1));
+    let mut lines: Vec<Line> = Vec::new();
+    let mut last_cwd: Option<&std::path::PathBuf> = None;
+    for (idx, entry) in entries.iter().enumerate() {
+        if last_cwd != Some(&entry.cwd) {
+            lines.push(Line::from(entry.cwd.display().to_string()));
+            last_cwd = Some(&entry.cwd);
+        }
+
+        let text = format!(
+            "  window {} pane {}  {}",
+            entry.window_idx,
+            entry.pane_id,
+            status_description(&entry.status)
+        );
+        let line = Line::from(text);
+        lines.push(if idx == selected {
+            line.style(Style::default().add_modifier(Modifier::REVERSED))
+        } else {
+            line
+        });
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU16;
@@ -211,10 +251,11 @@ mod tests {
     use ratatui::style::{Color, Modifier};
     use ratatui::Terminal;
 
-    use super::{render_pane, render_screen, render_sidebar, render_status_line};
+    use super::{render_overview, render_pane, render_screen, render_sidebar, render_status_line};
+    use crate::app::OverviewEntry;
     use crate::config::Colors;
     use crate::ipc::HookEvent;
-    use crate::state::{EditEntry, PaneState, StateEngine};
+    use crate::state::{EditEntry, PaneState, PaneStatus, StateEngine};
 
     #[test]
     fn renders_plain_text_with_default_style() {
@@ -447,5 +488,95 @@ mod tests {
 
         assert!(inner_lines.iter().any(|l| l.trim_start().starts_with('+')));
         assert!(inner_lines.iter().any(|l| l.trim_start().starts_with('-')));
+    }
+
+    #[test]
+    fn render_overview_groups_entries_by_cwd_and_shows_identifiers_and_status() {
+        let cwd = std::path::PathBuf::from("/tmp/project");
+        let entries = vec![
+            OverviewEntry {
+                window_idx: 0,
+                pane_id: 0,
+                cwd: cwd.clone(),
+                status: PaneStatus::Idle,
+            },
+            OverviewEntry {
+                window_idx: 1,
+                pane_id: 0,
+                cwd: cwd.clone(),
+                status: PaneStatus::RunningTool("Bash".to_string()),
+            },
+        ];
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_overview(frame, frame.area(), &entries, 0))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..20 {
+            for x in 0..60 {
+                text.push_str(buffer.cell((x, y)).unwrap().symbol());
+            }
+            text.push('\n');
+        }
+
+        assert_eq!(text.matches("/tmp/project").count(), 1);
+        assert!(text.contains("window 0 pane 0"));
+        assert!(text.contains("window 1 pane 0"));
+        assert!(text.contains("idle"));
+        assert!(text.contains("running tool \"Bash\""));
+    }
+
+    #[test]
+    fn render_overview_highlights_selected_row() {
+        let cwd = std::path::PathBuf::from("/tmp/project");
+        let entries = vec![
+            OverviewEntry {
+                window_idx: 0,
+                pane_id: 0,
+                cwd: cwd.clone(),
+                status: PaneStatus::Idle,
+            },
+            OverviewEntry {
+                window_idx: 1,
+                pane_id: 0,
+                cwd: cwd.clone(),
+                status: PaneStatus::Idle,
+            },
+        ];
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_overview(frame, frame.area(), &entries, 1))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let row_with_window_1 = (0..20)
+            .find(|&y| {
+                let mut line = String::new();
+                for x in 0..60 {
+                    line.push_str(buffer.cell((x, y)).unwrap().symbol());
+                }
+                line.contains("window 1 pane 0")
+            })
+            .unwrap();
+        let row_with_window_0 = (0..20)
+            .find(|&y| {
+                let mut line = String::new();
+                for x in 0..60 {
+                    line.push_str(buffer.cell((x, y)).unwrap().symbol());
+                }
+                line.contains("window 0 pane 0")
+            })
+            .unwrap();
+
+        let selected_cell = buffer.cell((2, row_with_window_1)).unwrap();
+        let unselected_cell = buffer.cell((2, row_with_window_0)).unwrap();
+        assert!(selected_cell.modifier.contains(Modifier::REVERSED));
+        assert!(!unselected_cell.modifier.contains(Modifier::REVERSED));
     }
 }

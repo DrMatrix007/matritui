@@ -35,6 +35,10 @@ pub enum Action {
     Quit,
     ToggleSidebar,
     ExpandNextEdit,
+    ToggleOverview,
+    OverviewUp,
+    OverviewDown,
+    OverviewSelect,
     None,
 }
 
@@ -43,6 +47,7 @@ enum State {
     Normal,
     AwaitingPrefix,
     AwaitingKillConfirm,
+    Overview,
 }
 
 pub struct InputHandler {
@@ -101,6 +106,10 @@ impl InputHandler {
                     c if c == self.bindings.quit => Action::Quit,
                     c if c == self.bindings.toggle_sidebar => Action::ToggleSidebar,
                     c if c == self.bindings.expand_edit => Action::ExpandNextEdit,
+                    c if c == self.bindings.toggle_overview => {
+                        self.state = State::Overview;
+                        Action::ToggleOverview
+                    }
                     _ => Action::None,
                 }
             }
@@ -111,6 +120,18 @@ impl InputHandler {
                     _ => Action::CancelKillPane,
                 }
             }
+            State::Overview => match key.code {
+                c if c == self.bindings.focus_up => Action::OverviewUp,
+                c if c == self.bindings.focus_down => Action::OverviewDown,
+                KeyCode::Enter => {
+                    self.state = State::Normal;
+                    Action::OverviewSelect
+                }
+                _ => {
+                    self.state = State::Normal;
+                    Action::ToggleOverview
+                }
+            },
         }
     }
 }
@@ -406,5 +427,55 @@ mod tests {
         let mut handler = InputHandler::with_config(custom_bindings());
         assert_eq!(handler.handle_key(ctrl_a()), Action::None);
         assert_eq!(handler.handle_key(ctrl_a()), Action::Forward(vec![0x01]));
+    }
+
+    #[test]
+    fn prefix_then_o_toggles_overview() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('o')), Action::ToggleOverview);
+    }
+
+    #[test]
+    fn overview_up_and_down_navigate_without_prefix() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('o')), Action::ToggleOverview);
+
+        assert_eq!(
+            handler.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            Action::OverviewDown
+        );
+        assert_eq!(
+            handler.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            Action::OverviewUp
+        );
+    }
+
+    #[test]
+    fn overview_enter_selects_and_returns_to_normal() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('o')), Action::ToggleOverview);
+
+        assert_eq!(
+            handler.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::OverviewSelect
+        );
+
+        let key = plain('a');
+        assert_eq!(handler.handle_key(key), Action::Forward(key_to_bytes(key)));
+    }
+
+    #[test]
+    fn overview_unbound_key_cancels_and_returns_to_normal() {
+        let mut handler = InputHandler::new();
+        assert_eq!(handler.handle_key(ctrl_b()), Action::None);
+        assert_eq!(handler.handle_key(plain('o')), Action::ToggleOverview);
+
+        assert_eq!(handler.handle_key(plain('z')), Action::ToggleOverview);
+
+        let key = plain('a');
+        assert_eq!(handler.handle_key(key), Action::Forward(key_to_bytes(key)));
     }
 }

@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 use std::num::NonZeroU16;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -12,6 +12,7 @@ pub struct Pane {
     parser: Arc<Mutex<vt100::Parser>>,
     hook_id: String,
     settings_path: Option<PathBuf>,
+    cwd: PathBuf,
 }
 
 impl Pane {
@@ -37,11 +38,14 @@ impl Pane {
     }
 
     fn spawn_from_builder(
-        builder: CommandBuilder,
+        mut builder: CommandBuilder,
         size: (u16, u16),
         hook_id: String,
         settings_path: Option<PathBuf>,
     ) -> std::io::Result<Pane> {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        builder.cwd(cwd.as_os_str());
+
         let (rows, cols) = size;
 
         let pty_system = native_pty_system();
@@ -86,11 +90,16 @@ impl Pane {
             parser,
             hook_id,
             settings_path,
+            cwd,
         })
     }
 
     pub fn hook_id(&self) -> &str {
         &self.hook_id
+    }
+
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
     }
 
     pub fn write_input(&mut self, bytes: &[u8]) -> std::io::Result<()> {
@@ -172,5 +181,14 @@ mod tests {
 
         pane_a.kill().unwrap();
         pane_b.kill().unwrap();
+    }
+
+    #[test]
+    fn spawn_captures_current_dir_as_cwd() {
+        let mut pane = Pane::spawn("cat", (24, 80)).unwrap();
+
+        assert_eq!(pane.cwd(), std::env::current_dir().unwrap());
+
+        pane.kill().unwrap();
     }
 }
