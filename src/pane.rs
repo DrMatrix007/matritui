@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::num::NonZeroU16;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -9,10 +10,38 @@ pub struct Pane {
     child: Box<dyn Child + Send + Sync>,
     writer: Box<dyn Write + Send>,
     parser: Arc<Mutex<vt100::Parser>>,
+    hook_id: String,
+    settings_path: Option<PathBuf>,
 }
 
 impl Pane {
     pub fn spawn(cmd: &str, size: (u16, u16)) -> std::io::Result<Pane> {
+        Self::spawn_from_builder(CommandBuilder::new(cmd), size, String::new(), None)
+    }
+
+    pub fn spawn_with_hooks(
+        cmd: &str,
+        size: (u16, u16),
+        hook_id: String,
+        settings_path: PathBuf,
+        env: Vec<(String, String)>,
+        args: Vec<String>,
+    ) -> std::io::Result<Pane> {
+        let mut builder = CommandBuilder::new(cmd);
+        builder.args(args);
+        for (key, value) in env {
+            builder.env(key, value);
+        }
+
+        Self::spawn_from_builder(builder, size, hook_id, Some(settings_path))
+    }
+
+    fn spawn_from_builder(
+        builder: CommandBuilder,
+        size: (u16, u16),
+        hook_id: String,
+        settings_path: Option<PathBuf>,
+    ) -> std::io::Result<Pane> {
         let (rows, cols) = size;
 
         let pty_system = native_pty_system();
@@ -25,10 +54,7 @@ impl Pane {
             })
             .map_err(std::io::Error::other)?;
 
-        let child = pair
-            .slave
-            .spawn_command(CommandBuilder::new(cmd))
-            .map_err(std::io::Error::other)?;
+        let child = pair.slave.spawn_command(builder).map_err(std::io::Error::other)?;
 
         let writer = pair.master.take_writer().map_err(std::io::Error::other)?;
         let mut reader = pair
@@ -58,7 +84,13 @@ impl Pane {
             child,
             writer,
             parser,
+            hook_id,
+            settings_path,
         })
+    }
+
+    pub fn hook_id(&self) -> &str {
+        &self.hook_id
     }
 
     pub fn write_input(&mut self, bytes: &[u8]) -> std::io::Result<()> {
@@ -98,5 +130,47 @@ impl Pane {
 
     pub fn parser(&self) -> &Arc<Mutex<vt100::Parser>> {
         &self.parser
+    }
+}
+
+impl Drop for Pane {
+    fn drop(&mut self) {
+        if let Some(path) = &self.settings_path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_with_hooks_stores_given_hook_id() {
+        let mut pane_a = Pane::spawn_with_hooks(
+            "cat",
+            (24, 80),
+            "test-pane-a".to_string(),
+            PathBuf::from("/tmp/mmux-pane-test-a.json"),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let mut pane_b = Pane::spawn_with_hooks(
+            "cat",
+            (24, 80),
+            "test-pane-b".to_string(),
+            PathBuf::from("/tmp/mmux-pane-test-b.json"),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        assert_eq!(pane_a.hook_id(), "test-pane-a");
+        assert_eq!(pane_b.hook_id(), "test-pane-b");
+        assert_ne!(pane_a.hook_id(), pane_b.hook_id());
+
+        pane_a.kill().unwrap();
+        pane_b.kill().unwrap();
     }
 }

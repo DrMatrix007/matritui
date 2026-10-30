@@ -3,6 +3,7 @@ use std::io;
 
 use ratatui::layout::Rect;
 
+use crate::hooks;
 use crate::layout;
 use crate::pane;
 
@@ -25,7 +26,10 @@ fn inset(r: Rect) -> Rect {
 
 impl Window {
     pub fn new(cmd: &str, area: Rect) -> io::Result<Window> {
-        let pane = pane::Pane::spawn(cmd, (area.height, area.width))?;
+        let hook_id = hooks::next_hook_id();
+        let settings_path = hooks::write_settings_file(&hook_id)?;
+        let (env, args) = hooks::pane_launch_extras(&hook_id, &settings_path);
+        let pane = pane::Pane::spawn_with_hooks(cmd, (area.height, area.width), hook_id, settings_path, env, args)?;
         let mut panes = HashMap::new();
         panes.insert(0, pane);
 
@@ -60,7 +64,10 @@ impl Window {
         let rects = self.effective_rects();
         for (id, rect) in &rects {
             if *id == new_id {
-                let pane = pane::Pane::spawn(cmd, (rect.height, rect.width))?;
+                let hook_id = hooks::next_hook_id();
+                let settings_path = hooks::write_settings_file(&hook_id)?;
+                let (env, args) = hooks::pane_launch_extras(&hook_id, &settings_path);
+                let pane = pane::Pane::spawn_with_hooks(cmd, (rect.height, rect.width), hook_id, settings_path, env, args)?;
                 self.panes.insert(new_id, pane);
             } else if let Some(pane) = self.panes.get_mut(id) {
                 pane.resize(rect.height, rect.width)?;

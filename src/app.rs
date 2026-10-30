@@ -2,6 +2,8 @@ use std::io;
 
 use ratatui::layout::{Constraint, Layout, Rect};
 
+use crate::hooks;
+use crate::ipc;
 use crate::window::Window;
 
 fn clamp_min_size(mut r: Rect) -> Rect {
@@ -15,6 +17,7 @@ pub struct App {
     focused_window: usize,
     content_rect: Rect,
     cmd: String,
+    event_log: hooks::EventLog,
 }
 
 impl App {
@@ -26,6 +29,7 @@ impl App {
             focused_window: 0,
             content_rect: area,
             cmd: cmd.to_string(),
+            event_log: hooks::EventLog::default(),
         })
     }
 
@@ -108,6 +112,14 @@ impl App {
 
     pub fn focused_window_mut(&mut self) -> &mut Window {
         &mut self.windows[self.focused_window]
+    }
+
+    pub fn record_hook_event(&mut self, event: ipc::HookEvent) {
+        self.event_log.record(event);
+    }
+
+    pub fn event_log(&self) -> &hooks::EventLog {
+        &self.event_log
     }
 }
 

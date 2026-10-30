@@ -1,6 +1,9 @@
 mod app;
 mod config;
+mod hook_forward;
+mod hooks;
 mod input;
+mod ipc;
 mod layout;
 mod pane;
 mod render;
@@ -18,7 +21,15 @@ impl Drop for TerminalGuard {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("hook-forward") {
+        hook_forward::run();
+        return Ok(());
+    }
+
     let config = config::Config::load();
+
+    // Bind once, process-wide, before any panes are spawned, so pane processes' MMUX_IPC_SOCKET (set by hooks::pane_launch_extras from this same ipc::socket_name()) matches a socket we're actually listening on.
+    let ipc_server = ipc::Server::bind(&ipc::socket_name())?;
 
     crossterm::terminal::enable_raw_mode()?;
     crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
@@ -38,15 +49,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut input_handler = input::InputHandler::with_config(config.keybindings);
     let mut awaiting_kill_confirm = false;
+    let mut show_hook_overlay = false;
 
     loop {
         if app.reap_exited_panes()? {
             break;
         }
 
+        while let Some(event) = ipc_server.try_recv() {
+            app.record_hook_event(event);
+        }
+
         if crossterm::event::poll(std::time::Duration::from_millis(33))? {
             match crossterm::event::read()? {
                 Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press && key.code == crossterm::event::KeyCode::F(12) {
+                        show_hook_overlay = !show_hook_overlay;
+                        continue;
+                    }
                     if key.kind == KeyEventKind::Press {
                         match input_handler.handle_key(key) {
                             input::Action::Forward(bytes) => {
@@ -128,6 +148,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
             render::render_status_line(frame, status_area, &names, focused_idx, prompt.as_deref(), &config.colors);
+
+            if show_hook_overlay
+                && let Some(pane) = window.pane(focused_id)
+            {
+                render::render_hook_log_overlay(frame, frame.area(), app.event_log().events_for(pane.hook_id()));
+            }
         })?;
     }
 

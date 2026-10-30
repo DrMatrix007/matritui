@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::config::Colors;
+use crate::ipc;
 
 fn translate_color(color: vt100::Color) -> Option<Color> {
     match color {
@@ -123,6 +124,26 @@ pub fn render_status_line(
         .collect::<Vec<_>>()
         .join("  ");
     frame.render_widget(Paragraph::new(line).style(style), rect);
+}
+
+pub fn render_hook_log_overlay(frame: &mut ratatui::Frame, area: ratatui::layout::Rect, events: &[ipc::HookEvent]) {
+    let lines: Vec<String> = events
+        .iter()
+        .map(|e| {
+            let name = e.event.get("hook_event_name").and_then(|v| v.as_str()).unwrap_or("?");
+            let snippet = e.event.to_string();
+            let snippet: String = if snippet.chars().count() > 80 {
+                format!("{}...", snippet.chars().take(80).collect::<String>())
+            } else {
+                snippet
+            };
+            format!("{name}: {snippet}")
+        })
+        .collect();
+    let block = Block::default().borders(Borders::ALL).title("hook events");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(lines.join("\n")), inner);
 }
 
 #[cfg(test)]
