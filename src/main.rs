@@ -8,11 +8,28 @@ mod layout;
 mod pane;
 mod render;
 mod state;
+mod transcript;
 mod window;
+
+use std::path::PathBuf;
 
 use crossterm::event::{Event, KeyEventKind};
 
 const SIDEBAR_WIDTH: u16 = 40;
+const AGENT_CMD: &str = "claude";
+
+enum PendingConfirmUi {
+    None,
+    KillPane,
+    Quit,
+}
+
+#[derive(PartialEq, Eq)]
+enum SidebarMode {
+    Hidden,
+    Edits,
+    Nav,
+}
 
 struct TerminalGuard;
 
@@ -48,14 +65,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ratatui::layout::Constraint::Length(1),
     ])
     .split(full_area)[0];
-    let mut app = app::App::new("claude", content_area)?;
+    let mut app = app::App::new(&config.default_shell, false, content_area)?;
 
     let mut input_handler = input::InputHandler::with_config(config.keybindings);
-    let mut awaiting_kill_confirm = false;
-    let mut show_sidebar = false;
+    let mut pending_confirm = PendingConfirmUi::None;
+    let mut sidebar_mode = SidebarMode::Hidden;
     let mut expanded_edit_rank: Option<usize> = None;
     let mut show_overview = false;
     let mut overview_selected: usize = 0;
+    let mut nav_selected: usize = 0;
 
     loop {
         if app.reap_exited_panes()? {
@@ -66,6 +84,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.record_hook_event(event);
         }
 
+        app.refresh_transcript_stats();
+
+        app.focused_window_mut().tick_animation();
+
         if crossterm::event::poll(std::time::Duration::from_millis(33))? {
             match crossterm::event::read()? {
                 Event::Key(key) => {
@@ -75,7 +97,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.focused_window_mut().write_to_focused(&bytes)?;
                             }
                             input::Action::NewWindow => {
-                                app.new_window()?;
+                                app.new_window(&config.default_shell, false)?;
+                            }
+                            input::Action::NewWindowAgent => {
+                                app.new_window(AGENT_CMD, true)?;
+                            }
+                            input::Action::StartNewWorkspace => {}
+                            input::Action::CreateWorkspace(path) => {
+                                app.new_workspace(PathBuf::from(path), &config.default_shell, false)?;
                             }
                             input::Action::NextWindow => {
                                 app.next_window();
@@ -87,35 +116,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 app.select_window(n);
                             }
                             input::Action::SplitHorizontal => {
-                                app.focused_window_mut().split(layout::SplitDirection::Horizontal, "claude")?;
+                                app.split_focused(layout::SplitDirection::Horizontal, &config.default_shell, false)?;
+                            }
+                            input::Action::SplitHorizontalAgent => {
+                                app.split_focused(layout::SplitDirection::Horizontal, AGENT_CMD, true)?;
                             }
                             input::Action::SplitVertical => {
-                                app.focused_window_mut().split(layout::SplitDirection::Vertical, "claude")?;
+                                app.split_focused(layout::SplitDirection::Vertical, &config.default_shell, false)?;
+                            }
+                            input::Action::SplitVerticalAgent => {
+                                app.split_focused(layout::SplitDirection::Vertical, AGENT_CMD, true)?;
                             }
                             input::Action::FocusPane(dir) => {
                                 app.focused_window_mut().focus_direction(dir);
                             }
                             input::Action::KillPane => {
-                                awaiting_kill_confirm = true;
+                                pending_confirm = PendingConfirmUi::KillPane;
                             }
                             input::Action::ConfirmKillPane => {
-                                awaiting_kill_confirm = false;
+                                pending_confirm = PendingConfirmUi::None;
                                 if app.close_focused_pane()? {
                                     break;
                                 }
                             }
-                            input::Action::CancelKillPane => {
-                                awaiting_kill_confirm = false;
+                            input::Action::CancelConfirm => {
+                                pending_confirm = PendingConfirmUi::None;
                             }
                             input::Action::ToggleSidebar => {
-                                show_sidebar = !show_sidebar;
+                                sidebar_mode = match sidebar_mode {
+                                    SidebarMode::Edits => SidebarMode::Hidden,
+                                    SidebarMode::Hidden | SidebarMode::Nav => SidebarMode::Edits,
+                                };
                                 expanded_edit_rank = None;
                                 let (cols, rows) = crossterm::terminal::size()?;
                                 let full_area = ratatui::layout::Rect { x: 0, y: 0, width: cols, height: rows };
-                                app.resize(full_area, if show_sidebar { SIDEBAR_WIDTH } else { 0 })?;
+                                app.resize(full_area, if sidebar_mode == SidebarMode::Hidden { 0 } else { SIDEBAR_WIDTH })?;
+                            }
+                            input::Action::ToggleNavSidebar => {
+                                sidebar_mode = match sidebar_mode {
+                                    SidebarMode::Nav => SidebarMode::Hidden,
+                                    SidebarMode::Hidden | SidebarMode::Edits => SidebarMode::Nav,
+                                };
+                                nav_selected = 0;
+                                let (cols, rows) = crossterm::terminal::size()?;
+                                let full_area = ratatui::layout::Rect { x: 0, y: 0, width: cols, height: rows };
+                                app.resize(full_area, if sidebar_mode == SidebarMode::Hidden { 0 } else { SIDEBAR_WIDTH })?;
+                            }
+                            input::Action::NavUp => {
+                                if sidebar_mode == SidebarMode::Nav {
+                                    nav_selected = nav_selected.saturating_sub(1);
+                                }
+                            }
+                            input::Action::NavDown => {
+                                if sidebar_mode == SidebarMode::Nav {
+                                    let len = app.overview_entries().len();
+                                    if nav_selected + 1 < len {
+                                        nav_selected += 1;
+                                    }
+                                }
+                            }
+                            input::Action::NavSelect => {
+                                if sidebar_mode == SidebarMode::Nav
+                                    && let Some(entry) = app.overview_entries().get(nav_selected)
+                                {
+                                    app.focus_pane(entry.workspace_idx, entry.window_idx, entry.pane_id);
+                                }
                             }
                             input::Action::ExpandNextEdit => {
-                                if show_sidebar
+                                if sidebar_mode == SidebarMode::Edits
                                     && let Some(pane) = app.focused_window().pane(app.focused_window().focused_id())
                                 {
                                     let len = app.pane_state(pane.hook_id()).edit_timeline.len();
@@ -143,15 +211,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             input::Action::OverviewSelect => {
                                 if let Some(entry) = app.overview_entries().get(overview_selected) {
-                                    app.focus_pane(entry.window_idx, entry.pane_id);
+                                    app.focus_pane(entry.workspace_idx, entry.window_idx, entry.pane_id);
                                 }
                                 show_overview = false;
                             }
-                            // tmux's real Ctrl-b d is detach-client. Detach/reattach isn't implemented yet
-                            // (single-process, deferred to a later milestone), so Ctrl-b d is repurposed here
-                            // as "quit mmux entirely, killing all panes" -- the closest available match to
-                            // tmux's semantics given that detach doesn't exist yet.
                             input::Action::Quit => {
+                                pending_confirm = PendingConfirmUi::Quit;
+                            }
+                            input::Action::ConfirmQuit => {
                                 break;
                             }
                             input::Action::None => {}
@@ -161,22 +228,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Resize(cols, rows) => {
                     app.resize(
                         ratatui::layout::Rect { x: 0, y: 0, width: cols, height: rows },
-                        if show_sidebar { SIDEBAR_WIDTH } else { 0 },
+                        if sidebar_mode == SidebarMode::Hidden { 0 } else { SIDEBAR_WIDTH },
                     )?;
                 }
                 _ => {}
             }
         }
 
+        let prompt = match pending_confirm {
+            PendingConfirmUi::KillPane => {
+                Some(format!("kill-pane {}? (y/n)", app.focused_window().focused_id()))
+            }
+            PendingConfirmUi::Quit => Some("quit mmux? (y/n)".to_string()),
+            PendingConfirmUi::None => input_handler
+                .pending_workspace_path()
+                .map(|buffer| format!("new workspace path: {buffer}")),
+        };
+
         terminal.draw(|frame| {
             if show_overview {
                 let entries = app.overview_entries();
-                render::render_overview(frame, frame.area(), &entries, overview_selected);
+                render::render_overview(frame, frame.area(), &entries, overview_selected, "overview");
                 return;
             }
 
-            let (left_area, sidebar_rect) =
-                app::split_for_sidebar(frame.area(), if show_sidebar { SIDEBAR_WIDTH } else { 0 });
+            let (left_area, sidebar_rect) = app::split_for_sidebar(
+                frame.area(),
+                if sidebar_mode == SidebarMode::Hidden { 0 } else { SIDEBAR_WIDTH },
+            );
             let status_area = ratatui::layout::Layout::vertical([
                 ratatui::layout::Constraint::Min(0),
                 ratatui::layout::Constraint::Length(1),
@@ -184,7 +263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .split(left_area)[1];
 
             let window = app.focused_window();
-            let rects = window.pane_rects();
+            let rects = window.pane_rects_animated();
             let draw_border = rects.len() >= 2;
             let focused_id = window.focused_id();
             for (id, rect) in &rects {
@@ -194,18 +273,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            if let Some(ghost_rect) = window.closing_ghost_rect() {
+                frame.render_widget(
+                    ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL),
+                    ghost_rect,
+                );
+            }
+
             let (names, focused_idx) = app.window_names();
-            let prompt = if awaiting_kill_confirm {
-                Some(format!("kill-pane {}? (y/n)", focused_id))
-            } else {
-                None
-            };
             render::render_status_line(frame, status_area, &names, focused_idx, prompt.as_deref(), &config.colors);
 
-            if show_sidebar
-                && let Some(pane) = window.pane(focused_id)
-            {
-                render::render_sidebar(frame, sidebar_rect, app.pane_state(pane.hook_id()), expanded_edit_rank);
+            match sidebar_mode {
+                SidebarMode::Edits => {
+                    if let Some(pane) = window.pane(focused_id) {
+                        render::render_sidebar(frame, sidebar_rect, app.pane_state(pane.hook_id()), expanded_edit_rank);
+                    }
+                }
+                SidebarMode::Nav => {
+                    let entries = app.overview_entries();
+                    render::render_overview(frame, sidebar_rect, &entries, nav_selected, "nav");
+                }
+                SidebarMode::Hidden => {}
             }
         })?;
     }

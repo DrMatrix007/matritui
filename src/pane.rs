@@ -16,8 +16,8 @@ pub struct Pane {
 }
 
 impl Pane {
-    pub fn spawn(cmd: &str, size: (u16, u16)) -> std::io::Result<Pane> {
-        Self::spawn_from_builder(CommandBuilder::new(cmd), size, String::new(), None)
+    pub fn spawn(cmd: &str, size: (u16, u16), cwd: &Path) -> std::io::Result<Pane> {
+        Self::spawn_from_builder(CommandBuilder::new(cmd), size, String::new(), None, cwd)
     }
 
     pub fn spawn_with_hooks(
@@ -27,6 +27,7 @@ impl Pane {
         settings_path: PathBuf,
         env: Vec<(String, String)>,
         args: Vec<String>,
+        cwd: &Path,
     ) -> std::io::Result<Pane> {
         let mut builder = CommandBuilder::new(cmd);
         builder.args(args);
@@ -34,7 +35,7 @@ impl Pane {
             builder.env(key, value);
         }
 
-        Self::spawn_from_builder(builder, size, hook_id, Some(settings_path))
+        Self::spawn_from_builder(builder, size, hook_id, Some(settings_path), cwd)
     }
 
     fn spawn_from_builder(
@@ -42,8 +43,8 @@ impl Pane {
         size: (u16, u16),
         hook_id: String,
         settings_path: Option<PathBuf>,
+        cwd: &Path,
     ) -> std::io::Result<Pane> {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         builder.cwd(cwd.as_os_str());
 
         let (rows, cols) = size;
@@ -90,12 +91,16 @@ impl Pane {
             parser,
             hook_id,
             settings_path,
-            cwd,
+            cwd: cwd.to_path_buf(),
         })
     }
 
     pub fn hook_id(&self) -> &str {
         &self.hook_id
+    }
+
+    pub fn is_agent(&self) -> bool {
+        self.settings_path.is_some()
     }
 
     pub fn cwd(&self) -> &Path {
@@ -163,6 +168,7 @@ mod tests {
             PathBuf::from("/tmp/mmux-pane-test-a.json"),
             vec![],
             vec![],
+            std::env::current_dir().unwrap().as_path(),
         )
         .unwrap();
         let mut pane_b = Pane::spawn_with_hooks(
@@ -172,6 +178,7 @@ mod tests {
             PathBuf::from("/tmp/mmux-pane-test-b.json"),
             vec![],
             vec![],
+            std::env::current_dir().unwrap().as_path(),
         )
         .unwrap();
 
@@ -185,9 +192,47 @@ mod tests {
 
     #[test]
     fn spawn_captures_current_dir_as_cwd() {
-        let mut pane = Pane::spawn("cat", (24, 80)).unwrap();
+        let mut pane = Pane::spawn("cat", (24, 80), &std::env::current_dir().unwrap()).unwrap();
 
         assert_eq!(pane.cwd(), std::env::current_dir().unwrap());
+
+        pane.kill().unwrap();
+    }
+
+    #[test]
+    fn spawn_with_explicit_cwd_different_from_process_cwd_is_used() {
+        let explicit_cwd = std::env::temp_dir();
+        let mut pane = Pane::spawn("cat", (24, 80), &explicit_cwd).unwrap();
+
+        assert_eq!(pane.cwd(), explicit_cwd);
+        assert_ne!(pane.cwd(), std::env::current_dir().unwrap());
+
+        pane.kill().unwrap();
+    }
+
+    #[test]
+    fn spawn_is_not_an_agent_pane() {
+        let mut pane = Pane::spawn("cat", (24, 80), &std::env::current_dir().unwrap()).unwrap();
+
+        assert!(!pane.is_agent());
+
+        pane.kill().unwrap();
+    }
+
+    #[test]
+    fn spawn_with_hooks_is_an_agent_pane() {
+        let mut pane = Pane::spawn_with_hooks(
+            "cat",
+            (24, 80),
+            "test-pane-agent".to_string(),
+            PathBuf::from("/tmp/mmux-pane-test-agent.json"),
+            vec![],
+            vec![],
+            &std::env::current_dir().unwrap(),
+        )
+        .unwrap();
+
+        assert!(pane.is_agent());
 
         pane.kill().unwrap();
     }

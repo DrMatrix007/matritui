@@ -80,10 +80,16 @@ pub fn split_leaf(node: &mut Node, target: PaneId, new_id: PaneId, dir: SplitDir
     }
 }
 
-pub fn remove_leaf(node: Node, target: PaneId) -> Option<Node> {
+#[derive(Debug, Clone, Copy)]
+pub struct CollapseInfo {
+    pub direction: SplitDirection,
+    pub removed_was_first: bool,
+}
+
+pub fn remove_leaf(node: Node, target: PaneId) -> Option<(Node, Option<CollapseInfo>)> {
     match node {
         Node::Leaf(id) if id == target => None,
-        Node::Leaf(_) => Some(node),
+        Node::Leaf(_) => Some((node, None)),
         Node::Split {
             direction,
             ratio,
@@ -91,20 +97,29 @@ pub fn remove_leaf(node: Node, target: PaneId) -> Option<Node> {
             second,
         } => {
             if matches!(*first, Node::Leaf(id) if id == target) {
-                return Some(*second);
+                let info = CollapseInfo {
+                    direction,
+                    removed_was_first: true,
+                };
+                return Some((*second, Some(info)));
             }
             if matches!(*second, Node::Leaf(id) if id == target) {
-                return Some(*first);
+                let info = CollapseInfo {
+                    direction,
+                    removed_was_first: false,
+                };
+                return Some((*first, Some(info)));
             }
 
-            let first = remove_leaf(*first, target)?;
-            let second = remove_leaf(*second, target)?;
-            Some(Node::Split {
+            let (first, first_info) = remove_leaf(*first, target)?;
+            let (second, second_info) = remove_leaf(*second, target)?;
+            let node = Node::Split {
                 direction,
                 ratio,
                 first: Box::new(first),
                 second: Box::new(second),
-            })
+            };
+            Some((node, first_info.or(second_info)))
         }
     }
 }

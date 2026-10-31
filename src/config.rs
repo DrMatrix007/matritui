@@ -27,6 +27,7 @@ pub fn parse_key(s: &str) -> Option<KeySpec> {
         "Down" => Some(KeySpec { code: KeyCode::Down, modifiers: KeyModifiers::NONE }),
         "Left" => Some(KeySpec { code: KeyCode::Left, modifiers: KeyModifiers::NONE }),
         "Right" => Some(KeySpec { code: KeyCode::Right, modifiers: KeyModifiers::NONE }),
+        "Enter" => Some(KeySpec { code: KeyCode::Enter, modifiers: KeyModifiers::NONE }),
         _ => {
             let mut chars = s.chars();
             let c = chars.next()?;
@@ -42,10 +43,14 @@ pub fn parse_key(s: &str) -> Option<KeySpec> {
 pub struct KeyBindings {
     pub prefix: KeySpec,
     pub new_window: KeyCode,
+    pub new_window_agent: KeyCode,
+    pub new_workspace: KeyCode,
     pub next_window: KeyCode,
     pub prev_window: KeyCode,
     pub split_horizontal: KeyCode,
+    pub split_horizontal_agent: KeyCode,
     pub split_vertical: KeyCode,
+    pub split_vertical_agent: KeyCode,
     pub focus_up: KeyCode,
     pub focus_down: KeyCode,
     pub focus_left: KeyCode,
@@ -55,6 +60,10 @@ pub struct KeyBindings {
     pub toggle_sidebar: KeyCode,
     pub expand_edit: KeyCode,
     pub toggle_overview: KeyCode,
+    pub toggle_nav_sidebar: KeyCode,
+    pub nav_up: KeyCode,
+    pub nav_down: KeyCode,
+    pub nav_select: KeyCode,
 }
 
 impl Default for KeyBindings {
@@ -62,19 +71,27 @@ impl Default for KeyBindings {
         KeyBindings {
             prefix: KeySpec { code: KeyCode::Char('b'), modifiers: KeyModifiers::CONTROL },
             new_window: KeyCode::Char('c'),
+            new_window_agent: KeyCode::Char('C'),
+            new_workspace: KeyCode::Char('W'),
             next_window: KeyCode::Char('n'),
             prev_window: KeyCode::Char('p'),
-            split_horizontal: KeyCode::Char('%'),
-            split_vertical: KeyCode::Char('"'),
+            split_horizontal: KeyCode::Char('|'),
+            split_horizontal_agent: KeyCode::Char('H'),
+            split_vertical: KeyCode::Char('-'),
+            split_vertical_agent: KeyCode::Char('V'),
             focus_up: KeyCode::Up,
             focus_down: KeyCode::Down,
             focus_left: KeyCode::Left,
             focus_right: KeyCode::Right,
             kill_pane: KeyCode::Char('x'),
-            quit: KeyCode::Char('d'),
+            quit: KeyCode::Char('Q'),
             toggle_sidebar: KeyCode::Char('s'),
             expand_edit: KeyCode::Char('e'),
             toggle_overview: KeyCode::Char('o'),
+            toggle_nav_sidebar: KeyCode::Char('N'),
+            nav_up: KeyCode::Char('k'),
+            nav_down: KeyCode::Char('j'),
+            nav_select: KeyCode::Enter,
         }
     }
 }
@@ -98,15 +115,27 @@ impl Default for Colors {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub keybindings: KeyBindings,
     pub colors: Colors,
+    pub default_shell: String,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            keybindings: KeyBindings::default(),
+            colors: Colors::default(),
+            default_shell: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string()),
+        }
+    }
 }
 
 #[derive(serde::Deserialize, Default)]
 struct RawConfig {
     prefix: Option<String>,
+    default_shell: Option<String>,
     keybindings: Option<RawKeyBindings>,
     colors: Option<RawColors>,
 }
@@ -114,10 +143,14 @@ struct RawConfig {
 #[derive(serde::Deserialize, Default)]
 struct RawKeyBindings {
     new_window: Option<String>,
+    new_window_agent: Option<String>,
+    new_workspace: Option<String>,
     next_window: Option<String>,
     prev_window: Option<String>,
     split_horizontal: Option<String>,
+    split_horizontal_agent: Option<String>,
     split_vertical: Option<String>,
+    split_vertical_agent: Option<String>,
     focus_up: Option<String>,
     focus_down: Option<String>,
     focus_left: Option<String>,
@@ -127,6 +160,10 @@ struct RawKeyBindings {
     toggle_sidebar: Option<String>,
     expand_edit: Option<String>,
     toggle_overview: Option<String>,
+    toggle_nav_sidebar: Option<String>,
+    nav_up: Option<String>,
+    nav_down: Option<String>,
+    nav_select: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -164,6 +201,10 @@ impl Config {
             }
         }
 
+        if let Some(default_shell) = &raw.default_shell {
+            config.default_shell = default_shell.clone();
+        }
+
         if let Some(raw_bindings) = &raw.keybindings {
             macro_rules! apply_key {
                 ($field:ident) => {
@@ -176,10 +217,14 @@ impl Config {
                 };
             }
             apply_key!(new_window);
+            apply_key!(new_window_agent);
+            apply_key!(new_workspace);
             apply_key!(next_window);
             apply_key!(prev_window);
             apply_key!(split_horizontal);
+            apply_key!(split_horizontal_agent);
             apply_key!(split_vertical);
+            apply_key!(split_vertical_agent);
             apply_key!(focus_up);
             apply_key!(focus_down);
             apply_key!(focus_left);
@@ -189,6 +234,10 @@ impl Config {
             apply_key!(toggle_sidebar);
             apply_key!(expand_edit);
             apply_key!(toggle_overview);
+            apply_key!(toggle_nav_sidebar);
+            apply_key!(nav_up);
+            apply_key!(nav_down);
+            apply_key!(nav_select);
         }
 
         if let Some(raw_colors) = &raw.colors {
@@ -251,24 +300,43 @@ mod tests {
             KeySpec { code: KeyCode::Char('b'), modifiers: KeyModifiers::CONTROL }
         );
         assert_eq!(config.keybindings.new_window, KeyCode::Char('c'));
+        assert_eq!(config.keybindings.new_window_agent, KeyCode::Char('C'));
+        assert_eq!(config.keybindings.new_workspace, KeyCode::Char('W'));
         assert_eq!(config.keybindings.next_window, KeyCode::Char('n'));
         assert_eq!(config.keybindings.prev_window, KeyCode::Char('p'));
-        assert_eq!(config.keybindings.split_horizontal, KeyCode::Char('%'));
-        assert_eq!(config.keybindings.split_vertical, KeyCode::Char('"'));
+        assert_eq!(config.keybindings.split_horizontal, KeyCode::Char('|'));
+        assert_eq!(config.keybindings.split_horizontal_agent, KeyCode::Char('H'));
+        assert_eq!(config.keybindings.split_vertical, KeyCode::Char('-'));
+        assert_eq!(config.keybindings.split_vertical_agent, KeyCode::Char('V'));
         assert_eq!(config.keybindings.focus_up, KeyCode::Up);
         assert_eq!(config.keybindings.focus_down, KeyCode::Down);
         assert_eq!(config.keybindings.focus_left, KeyCode::Left);
         assert_eq!(config.keybindings.focus_right, KeyCode::Right);
         assert_eq!(config.keybindings.kill_pane, KeyCode::Char('x'));
-        assert_eq!(config.keybindings.quit, KeyCode::Char('d'));
+        assert_eq!(config.keybindings.quit, KeyCode::Char('Q'));
         assert_eq!(config.keybindings.toggle_sidebar, KeyCode::Char('s'));
         assert_eq!(config.keybindings.expand_edit, KeyCode::Char('e'));
         assert_eq!(config.keybindings.toggle_overview, KeyCode::Char('o'));
+        assert_eq!(config.keybindings.toggle_nav_sidebar, KeyCode::Char('N'));
+        assert_eq!(config.keybindings.nav_up, KeyCode::Char('k'));
+        assert_eq!(config.keybindings.nav_down, KeyCode::Char('j'));
+        assert_eq!(config.keybindings.nav_select, KeyCode::Enter);
 
         assert_eq!(config.colors.focused_border, Color::Yellow);
         assert_eq!(config.colors.unfocused_border, Color::DarkGray);
         assert_eq!(config.colors.status_fg, None);
         assert_eq!(config.colors.status_bg, None);
+
+        assert_eq!(
+            config.default_shell,
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+        );
+    }
+
+    #[test]
+    fn default_shell_override_is_applied() {
+        let config = Config::from_toml_str("default_shell = \"/bin/zsh\"\n");
+        assert_eq!(config.default_shell, "/bin/zsh");
     }
 
     #[test]
@@ -287,6 +355,17 @@ mod tests {
         let default = Config::default();
         assert_eq!(config.keybindings.toggle_overview, KeyCode::Char('v'));
         assert_eq!(config.keybindings.toggle_sidebar, default.keybindings.toggle_sidebar);
+        assert_eq!(config.keybindings.new_window, default.keybindings.new_window);
+    }
+
+    #[test]
+    fn partial_override_for_nav_select_only_changes_that_field() {
+        let config = Config::from_toml_str("[keybindings]\nnav_select = \"Enter\"\n");
+        let default = Config::default();
+        assert_eq!(config.keybindings.nav_select, KeyCode::Enter);
+        assert_eq!(config.keybindings.toggle_nav_sidebar, default.keybindings.toggle_nav_sidebar);
+        assert_eq!(config.keybindings.nav_up, default.keybindings.nav_up);
+        assert_eq!(config.keybindings.nav_down, default.keybindings.nav_down);
         assert_eq!(config.keybindings.new_window, default.keybindings.new_window);
     }
 
@@ -327,6 +406,11 @@ mod tests {
     }
 
     #[test]
+    fn parse_key_enter() {
+        assert_eq!(parse_key("Enter"), Some(KeySpec { code: KeyCode::Enter, modifiers: KeyModifiers::NONE }));
+    }
+
+    #[test]
     fn parse_key_single_char() {
         assert_eq!(parse_key("c"), Some(KeySpec { code: KeyCode::Char('c'), modifiers: KeyModifiers::NONE }));
     }
@@ -340,13 +424,18 @@ mod tests {
     fn full_example_toml_deserializes() {
         let toml = r#"
 prefix = "C-b"
+default_shell = "/bin/zsh"
 
 [keybindings]
 new_window = "c"
+new_window_agent = "C"
+new_workspace = "W"
 next_window = "n"
 prev_window = "p"
 split_horizontal = "%"
+split_horizontal_agent = "H"
 split_vertical = "\""
+split_vertical_agent = "V"
 focus_up = "Up"
 focus_down = "Down"
 focus_left = "Left"
@@ -356,6 +445,10 @@ quit = "d"
 toggle_sidebar = "s"
 expand_edit = "e"
 toggle_overview = "o"
+toggle_nav_sidebar = "N"
+nav_up = "k"
+nav_down = "j"
+nav_select = "Enter"
 
 [colors]
 focused_border = "yellow"
@@ -366,13 +459,22 @@ status_bg = "blue"
         let config = Config::from_toml_str(toml);
         assert_eq!(config.keybindings.prefix, Config::default().keybindings.prefix);
         assert_eq!(config.keybindings.new_window, KeyCode::Char('c'));
+        assert_eq!(config.keybindings.new_window_agent, KeyCode::Char('C'));
+        assert_eq!(config.keybindings.new_workspace, KeyCode::Char('W'));
+        assert_eq!(config.keybindings.split_horizontal_agent, KeyCode::Char('H'));
+        assert_eq!(config.keybindings.split_vertical_agent, KeyCode::Char('V'));
         assert_eq!(config.keybindings.quit, KeyCode::Char('d'));
         assert_eq!(config.keybindings.toggle_sidebar, KeyCode::Char('s'));
         assert_eq!(config.keybindings.expand_edit, KeyCode::Char('e'));
         assert_eq!(config.keybindings.toggle_overview, KeyCode::Char('o'));
+        assert_eq!(config.keybindings.toggle_nav_sidebar, KeyCode::Char('N'));
+        assert_eq!(config.keybindings.nav_up, KeyCode::Char('k'));
+        assert_eq!(config.keybindings.nav_down, KeyCode::Char('j'));
+        assert_eq!(config.keybindings.nav_select, KeyCode::Enter);
         assert_eq!(config.colors.focused_border, Color::Yellow);
         assert_eq!(config.colors.unfocused_border, Color::DarkGray);
         assert_eq!(config.colors.status_fg, Some(Color::White));
         assert_eq!(config.colors.status_bg, Some(Color::Blue));
+        assert_eq!(config.default_shell, "/bin/zsh");
     }
 }

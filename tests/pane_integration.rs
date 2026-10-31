@@ -7,7 +7,7 @@ use std::time::Duration;
 
 #[test]
 fn write_input_is_read_back_and_resize_changes_parser_size() {
-    let mut pane = Pane::spawn("cat", (24, 80)).unwrap();
+    let mut pane = Pane::spawn("cat", (24, 80), &std::env::current_dir().unwrap()).unwrap();
 
     pane.write_input(b"hello\r\n").unwrap();
     std::thread::sleep(Duration::from_millis(200));
@@ -32,7 +32,7 @@ fn write_input_is_read_back_and_resize_changes_parser_size() {
 
 #[test]
 fn try_wait_exit_reports_success_for_exited_child() {
-    let mut pane = Pane::spawn("true", (24, 80)).unwrap();
+    let mut pane = Pane::spawn("true", (24, 80), &std::env::current_dir().unwrap()).unwrap();
 
     let mut status = None;
     for _ in 0..100 {

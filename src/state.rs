@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::ipc;
+use crate::transcript;
 
 pub enum PaneStatus {
     Idle,
@@ -37,6 +38,8 @@ struct PendingCall {
 pub struct PaneState {
     pub root_subagents: Vec<SubagentNode>,
     pub edit_timeline: Vec<EditEntry>,
+    pub session_id: Option<String>,
+    pub transcript_stats: Option<transcript::TranscriptStats>,
     pending_calls: HashMap<String, PendingCall>,
     next_seq: u64,
 }
@@ -183,6 +186,7 @@ impl StateEngine {
             "PostToolUse" => self.record_post_tool_use(event),
             "SubagentStart" => self.record_subagent_start(event),
             "SubagentStop" => self.record_subagent_stop(event),
+            "SessionStart" => self.record_session_start(event),
             _ => {}
         }
     }
@@ -322,6 +326,18 @@ impl StateEngine {
         if let Some(node) = find_node_mut(&mut pane.root_subagents, agent_id) {
             node.active = false;
         }
+    }
+
+    fn record_session_start(&mut self, event: &ipc::HookEvent) {
+        let Some(session_id) = str_field(&event.event, "session_id") else {
+            return;
+        };
+        let pane = self.by_pane.entry(event.pane_id.clone()).or_default();
+        pane.session_id = Some(session_id.to_string());
+    }
+
+    pub fn set_transcript_stats(&mut self, pane_id: &str, stats: transcript::TranscriptStats) {
+        self.by_pane.entry(pane_id.to_string()).or_default().transcript_stats = Some(stats);
     }
 }
 
@@ -650,6 +666,20 @@ mod tests {
         let state = engine.state_for("pane1");
         assert_eq!(state.root_subagents.len(), 1);
         assert!(!state.root_subagents[0].active);
+    }
+
+    #[test]
+    fn session_start_populates_session_id() {
+        let mut engine = StateEngine::default();
+        engine.record(&event(
+            "pane1",
+            serde_json::json!({
+                "hook_event_name": "SessionStart",
+                "session_id": "sess-123"
+            }),
+        ));
+
+        assert_eq!(engine.state_for("pane1").session_id, Some("sess-123".to_string()));
     }
 
     #[test]

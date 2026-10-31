@@ -137,20 +137,32 @@ fn status_description(status: &PaneStatus) -> String {
     }
 }
 
-fn push_subagent_tree_lines(lines: &mut Vec<String>, node: &SubagentNode, depth: usize) {
-    let indent = "  ".repeat(depth);
+fn subagent_node_label(node: &SubagentNode) -> String {
     let marker = if node.active { "▸" } else { "✓" };
-    let mut line = format!("{indent}{marker} {}", node.agent_type);
+    let mut label = format!("{marker} {}", node.agent_type);
     if let Some(description) = &node.description {
-        line.push_str(&format!(": \"{description}\""));
+        label.push_str(&format!(": \"{description}\""));
     }
     if let Some(tool) = &node.current_tool {
-        line.push_str(&format!(" [running: {tool}]"));
+        label.push_str(&format!(" [running: {tool}]"));
     }
-    lines.push(line);
-    for child in &node.children {
-        push_subagent_tree_lines(lines, child, depth + 1);
+    label
+}
+
+fn push_subagent_children_lines(lines: &mut Vec<String>, children: &[SubagentNode], prefix: &str) {
+    let n = children.len();
+    for (i, child) in children.iter().enumerate() {
+        let is_last = i + 1 == n;
+        let connector = if is_last { "└─ " } else { "├─ " };
+        lines.push(format!("{prefix}{connector}{}", subagent_node_label(child)));
+        let child_prefix = format!("{prefix}{}", if is_last { "   " } else { "│  " });
+        push_subagent_children_lines(lines, &child.children, &child_prefix);
     }
+}
+
+fn push_subagent_tree_lines(lines: &mut Vec<String>, node: &SubagentNode) {
+    lines.push(subagent_node_label(node));
+    push_subagent_children_lines(lines, &node.children, "");
 }
 
 fn diff_lines(before: &str, after: &str) -> Vec<Line<'static>> {
@@ -187,9 +199,20 @@ pub fn render_sidebar(
 
     let mut tree_lines = Vec::new();
     for node in &pane_state.root_subagents {
-        push_subagent_tree_lines(&mut tree_lines, node, 0);
+        push_subagent_tree_lines(&mut tree_lines, node);
     }
-    let tree_text = format!("{status_line}\n\n{}", tree_lines.join("\n"));
+    let tree_text = if let Some(stats) = &pane_state.transcript_stats {
+        format!(
+            "{status_line}\ntokens: {}/{} in/out  cost: ${:.4}  messages: {}\n\n{}",
+            stats.total_input_tokens,
+            stats.total_output_tokens,
+            stats.total_cost_usd,
+            stats.message_count,
+            tree_lines.join("\n")
+        )
+    } else {
+        format!("{status_line}\n\n{}", tree_lines.join("\n"))
+    };
     frame.render_widget(Paragraph::new(tree_text), tree_area);
 
     let mut timeline_lines: Vec<Line> = Vec::new();
@@ -212,8 +235,9 @@ pub fn render_overview(
     area: ratatui::layout::Rect,
     entries: &[OverviewEntry],
     selected: usize,
+    title: &str,
 ) {
-    let block = Block::default().borders(Borders::ALL).title("overview");
+    let block = Block::default().borders(Borders::ALL).title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -255,7 +279,7 @@ mod tests {
     use crate::app::OverviewEntry;
     use crate::config::Colors;
     use crate::ipc::HookEvent;
-    use crate::state::{EditEntry, PaneState, PaneStatus, StateEngine};
+    use crate::state::{EditEntry, PaneState, PaneStatus, StateEngine, SubagentNode};
 
     #[test]
     fn renders_plain_text_with_default_style() {
@@ -495,12 +519,14 @@ mod tests {
         let cwd = std::path::PathBuf::from("/tmp/project");
         let entries = vec![
             OverviewEntry {
+                workspace_idx: 0,
                 window_idx: 0,
                 pane_id: 0,
                 cwd: cwd.clone(),
                 status: PaneStatus::Idle,
             },
             OverviewEntry {
+                workspace_idx: 0,
                 window_idx: 1,
                 pane_id: 0,
                 cwd: cwd.clone(),
@@ -511,7 +537,7 @@ mod tests {
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render_overview(frame, frame.area(), &entries, 0))
+            .draw(|frame| render_overview(frame, frame.area(), &entries, 0, "overview"))
             .unwrap();
 
         let buffer = terminal.backend().buffer();
@@ -531,16 +557,46 @@ mod tests {
     }
 
     #[test]
+    fn render_overview_shows_custom_title() {
+        let entries = vec![OverviewEntry {
+            workspace_idx: 0,
+            window_idx: 0,
+            pane_id: 0,
+            cwd: std::path::PathBuf::from("/tmp/project"),
+            status: PaneStatus::Idle,
+        }];
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_overview(frame, frame.area(), &entries, 0, "nav"))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..20 {
+            for x in 0..60 {
+                text.push_str(buffer.cell((x, y)).unwrap().symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(text.contains("nav"));
+    }
+
+    #[test]
     fn render_overview_highlights_selected_row() {
         let cwd = std::path::PathBuf::from("/tmp/project");
         let entries = vec![
             OverviewEntry {
+                workspace_idx: 0,
                 window_idx: 0,
                 pane_id: 0,
                 cwd: cwd.clone(),
                 status: PaneStatus::Idle,
             },
             OverviewEntry {
+                workspace_idx: 0,
                 window_idx: 1,
                 pane_id: 0,
                 cwd: cwd.clone(),
@@ -551,7 +607,7 @@ mod tests {
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render_overview(frame, frame.area(), &entries, 1))
+            .draw(|frame| render_overview(frame, frame.area(), &entries, 1, "overview"))
             .unwrap();
 
         let buffer = terminal.backend().buffer();
@@ -578,5 +634,63 @@ mod tests {
         let unselected_cell = buffer.cell((2, row_with_window_0)).unwrap();
         assert!(selected_cell.modifier.contains(Modifier::REVERSED));
         assert!(!unselected_cell.modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn render_sidebar_shows_tree_connectors_for_multi_level_tree() {
+        let mut pane_state = PaneState::default();
+        pane_state.root_subagents.push(SubagentNode {
+            agent_id: "a1".to_string(),
+            agent_type: "Explore".to_string(),
+            description: None,
+            active: true,
+            current_tool: None,
+            children: vec![
+                SubagentNode {
+                    agent_id: "b1".to_string(),
+                    agent_type: "Task".to_string(),
+                    description: None,
+                    active: false,
+                    current_tool: None,
+                    children: vec![SubagentNode {
+                        agent_id: "c1".to_string(),
+                        agent_type: "Bash".to_string(),
+                        description: None,
+                        active: false,
+                        current_tool: None,
+                        children: vec![],
+                    }],
+                },
+                SubagentNode {
+                    agent_id: "b2".to_string(),
+                    agent_type: "Task".to_string(),
+                    description: None,
+                    active: false,
+                    current_tool: None,
+                    children: vec![],
+                },
+            ],
+        });
+
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_sidebar(frame, frame.area(), &pane_state, None))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..20 {
+            for x in 0..40 {
+                text.push_str(buffer.cell((x, y)).unwrap().symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(text.contains("├─"));
+        assert!(text.contains("└─"));
+        assert!(text.contains("│"));
+        assert!(text.contains("▸ Explore"));
+        assert!(text.contains("✓ Task"));
     }
 }

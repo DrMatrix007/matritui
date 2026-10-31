@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::io;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use ratatui::layout::Rect;
 
@@ -7,12 +9,22 @@ use crate::hooks;
 use crate::layout;
 use crate::pane;
 
+const ANIM_DURATION: Duration = Duration::from_millis(150);
+
+struct AnimTransition {
+    old_rects: Vec<(layout::PaneId, Rect)>,
+    new_rects: Vec<(layout::PaneId, Rect)>,
+    closing_ghost_target: Option<Rect>,
+    started: Instant,
+}
+
 pub struct Window {
     panes: HashMap<layout::PaneId, pane::Pane>,
     layout: layout::Node,
     focused: layout::PaneId,
     area: Rect,
     next_pane_id: layout::PaneId,
+    active_anim: Option<AnimTransition>,
 }
 
 fn inset(r: Rect) -> Rect {
@@ -24,12 +36,64 @@ fn inset(r: Rect) -> Rect {
     }
 }
 
-impl Window {
-    pub fn new(cmd: &str, area: Rect) -> io::Result<Window> {
+fn sliver(r: Rect) -> Rect {
+    Rect { x: r.x, y: r.y, width: 0, height: 0 }
+}
+
+fn ghost_target(old: Rect, info: layout::CollapseInfo) -> Rect {
+    match (info.direction, info.removed_was_first) {
+        (layout::SplitDirection::Horizontal, true) => Rect {
+            x: old.x + old.width,
+            y: old.y,
+            width: 0,
+            height: old.height,
+        },
+        (layout::SplitDirection::Horizontal, false) => Rect {
+            x: old.x,
+            y: old.y,
+            width: 0,
+            height: old.height,
+        },
+        (layout::SplitDirection::Vertical, true) => Rect {
+            x: old.x,
+            y: old.y + old.height,
+            width: old.width,
+            height: 0,
+        },
+        (layout::SplitDirection::Vertical, false) => Rect {
+            x: old.x,
+            y: old.y,
+            width: old.width,
+            height: 0,
+        },
+    }
+}
+
+fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
+    let t = t.clamp(0.0, 1.0);
+    let lerp = |x: u16, y: u16| (x as f32 + (y as f32 - x as f32) * t).round().max(0.0) as u16;
+    Rect {
+        x: lerp(a.x, b.x),
+        y: lerp(a.y, b.y),
+        width: lerp(a.width, b.width),
+        height: lerp(a.height, b.height),
+    }
+}
+
+fn spawn_pane(cmd: &str, size: (u16, u16), with_hooks: bool, cwd: &Path) -> io::Result<pane::Pane> {
+    if with_hooks {
         let hook_id = hooks::next_hook_id();
         let settings_path = hooks::write_settings_file(&hook_id)?;
         let (env, args) = hooks::pane_launch_extras(&hook_id, &settings_path);
-        let pane = pane::Pane::spawn_with_hooks(cmd, (area.height, area.width), hook_id, settings_path, env, args)?;
+        pane::Pane::spawn_with_hooks(cmd, size, hook_id, settings_path, env, args, cwd)
+    } else {
+        pane::Pane::spawn(cmd, size, cwd)
+    }
+}
+
+impl Window {
+    pub fn new(cmd: &str, with_hooks: bool, area: Rect, cwd: &Path) -> io::Result<Window> {
+        let pane = spawn_pane(cmd, (area.height, area.width), with_hooks, cwd)?;
         let mut panes = HashMap::new();
         panes.insert(0, pane);
 
@@ -39,6 +103,7 @@ impl Window {
             focused: 0,
             area,
             next_pane_id: 1,
+            active_anim: None,
         })
     }
 
@@ -55,34 +120,88 @@ impl Window {
         layout::compute_rects(&self.layout, self.area)
     }
 
-    pub fn split(&mut self, dir: layout::SplitDirection, cmd: &str) -> io::Result<()> {
+    pub fn pane_rects_animated(&self) -> Vec<(layout::PaneId, Rect)> {
+        let Some(anim) = &self.active_anim else {
+            return self.pane_rects();
+        };
+        let elapsed = anim.started.elapsed();
+        if elapsed >= ANIM_DURATION {
+            return self.pane_rects();
+        }
+        let t = elapsed.as_secs_f32() / ANIM_DURATION.as_secs_f32();
+        anim.new_rects
+            .iter()
+            .map(|(id, rect)| {
+                let from = anim
+                    .old_rects
+                    .iter()
+                    .find(|(old_id, _)| old_id == id)
+                    .map(|(_, r)| *r)
+                    .unwrap_or_else(|| sliver(*rect));
+                (*id, lerp_rect(from, *rect, t))
+            })
+            .collect()
+    }
+
+    pub fn closing_ghost_rect(&self) -> Option<Rect> {
+        let anim = self.active_anim.as_ref()?;
+        let elapsed = anim.started.elapsed();
+        if elapsed >= ANIM_DURATION {
+            return None;
+        }
+        let t = elapsed.as_secs_f32() / ANIM_DURATION.as_secs_f32();
+        let (_, rect) = anim.old_rects.iter().find(|(id, _)| !self.panes.contains_key(id))?;
+        let target = anim.closing_ghost_target.unwrap_or_else(|| sliver(*rect));
+        Some(lerp_rect(*rect, target, t))
+    }
+
+    pub fn tick_animation(&mut self) {
+        if let Some(anim) = &self.active_anim
+            && anim.started.elapsed() >= ANIM_DURATION
+        {
+            self.active_anim = None;
+        }
+    }
+
+    pub fn split(
+        &mut self,
+        dir: layout::SplitDirection,
+        cmd: &str,
+        with_hooks: bool,
+        cwd: &Path,
+    ) -> io::Result<()> {
         let new_id = self.next_pane_id;
         self.next_pane_id += 1;
 
+        let old_rects = self.pane_rects();
         layout::split_leaf(&mut self.layout, self.focused, new_id, dir);
 
         let rects = self.effective_rects();
         for (id, rect) in &rects {
             if *id == new_id {
-                let hook_id = hooks::next_hook_id();
-                let settings_path = hooks::write_settings_file(&hook_id)?;
-                let (env, args) = hooks::pane_launch_extras(&hook_id, &settings_path);
-                let pane = pane::Pane::spawn_with_hooks(cmd, (rect.height, rect.width), hook_id, settings_path, env, args)?;
+                let pane = spawn_pane(cmd, (rect.height, rect.width), with_hooks, cwd)?;
                 self.panes.insert(new_id, pane);
             } else if let Some(pane) = self.panes.get_mut(id) {
                 pane.resize(rect.height, rect.width)?;
             }
         }
 
+        self.active_anim = Some(AnimTransition {
+            old_rects,
+            new_rects: self.pane_rects(),
+            closing_ghost_target: None,
+            started: Instant::now(),
+        });
         self.focused = new_id;
         Ok(())
     }
 
     fn collapse_after_removal(&mut self, target: layout::PaneId) -> io::Result<bool> {
+        let old_rects = self.pane_rects();
         let old_layout = std::mem::replace(&mut self.layout, layout::Node::Leaf(0));
         match layout::remove_leaf(old_layout, target) {
             None => Ok(true),
-            Some(new_tree) => {
+            Some((new_tree, collapse_info)) => {
                 self.layout = new_tree;
                 let rects = self.effective_rects();
                 self.focused = rects[0].0;
@@ -91,6 +210,14 @@ impl Window {
                         pane.resize(rect.height, rect.width)?;
                     }
                 }
+                let removed_rect = old_rects.iter().find(|(id, _)| *id == target).map(|(_, r)| *r);
+                let closing_ghost_target = removed_rect.zip(collapse_info).map(|(old, info)| ghost_target(old, info));
+                self.active_anim = Some(AnimTransition {
+                    old_rects,
+                    new_rects: self.pane_rects(),
+                    closing_ghost_target,
+                    started: Instant::now(),
+                });
                 Ok(false)
             }
         }
@@ -198,9 +325,16 @@ mod tests {
     #[test]
     fn split_produces_non_overlapping_partitioning_rects() {
         let area = test_area();
-        let mut window = Window::new("cat", area).unwrap();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
 
-        window.split(layout::SplitDirection::Horizontal, "cat").unwrap();
+        window
+            .split(
+                layout::SplitDirection::Horizontal,
+                "cat",
+                false,
+                &std::env::current_dir().unwrap(),
+            )
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         assert_eq!(window.panes.len(), 2);
@@ -235,8 +369,15 @@ mod tests {
     #[test]
     fn close_focused_on_two_pane_window_leaves_surviving_pane_focused() {
         let area = test_area();
-        let mut window = Window::new("cat", area).unwrap();
-        window.split(layout::SplitDirection::Horizontal, "cat").unwrap();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
+        window
+            .split(
+                layout::SplitDirection::Horizontal,
+                "cat",
+                false,
+                &std::env::current_dir().unwrap(),
+            )
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         // split() leaves the newly created pane focused; the original pane (id 0)
@@ -256,7 +397,7 @@ mod tests {
     #[test]
     fn close_focused_on_one_pane_window_reports_window_empty() {
         let area = test_area();
-        let mut window = Window::new("cat", area).unwrap();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         let result = window.close_focused().unwrap();
@@ -268,8 +409,15 @@ mod tests {
     #[test]
     fn focus_pane_moves_focus_to_existing_pane_id() {
         let area = test_area();
-        let mut window = Window::new("cat", area).unwrap();
-        window.split(layout::SplitDirection::Horizontal, "cat").unwrap();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
+        window
+            .split(
+                layout::SplitDirection::Horizontal,
+                "cat",
+                false,
+                &std::env::current_dir().unwrap(),
+            )
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         assert_eq!(window.focused, 1);
@@ -283,11 +431,214 @@ mod tests {
     #[test]
     fn focus_pane_ignores_unknown_pane_id() {
         let area = test_area();
-        let mut window = Window::new("cat", area).unwrap();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         window.focus_pane(99);
         assert_eq!(window.focused, 0);
+
+        window.kill_all().unwrap();
+    }
+
+    #[test]
+    fn new_without_hooks_produces_plain_pane() {
+        let area = test_area();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert!(!window.pane(0).unwrap().is_agent());
+
+        window.kill_all().unwrap();
+    }
+
+    #[test]
+    fn new_with_hooks_produces_agent_pane() {
+        let area = test_area();
+        let mut window = Window::new("cat", true, area, &std::env::current_dir().unwrap()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert!(window.pane(0).unwrap().is_agent());
+
+        window.kill_all().unwrap();
+    }
+
+    #[test]
+    fn split_without_hooks_produces_plain_pane() {
+        let area = test_area();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
+        window
+            .split(
+                layout::SplitDirection::Horizontal,
+                "cat",
+                false,
+                &std::env::current_dir().unwrap(),
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert!(!window.pane(1).unwrap().is_agent());
+
+        window.kill_all().unwrap();
+    }
+
+    #[test]
+    fn split_with_hooks_produces_agent_pane() {
+        let area = test_area();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
+        window
+            .split(
+                layout::SplitDirection::Horizontal,
+                "cat",
+                true,
+                &std::env::current_dir().unwrap(),
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        assert!(window.pane(1).unwrap().is_agent());
+
+        window.kill_all().unwrap();
+    }
+
+    #[test]
+    fn lerp_rect_at_endpoints_and_midpoint() {
+        let a = Rect { x: 0, y: 0, width: 0, height: 0 };
+        let b = Rect { x: 10, y: 20, width: 40, height: 60 };
+
+        assert_eq!(lerp_rect(a, b, 0.0), a);
+        assert_eq!(lerp_rect(a, b, 1.0), b);
+
+        let mid = lerp_rect(a, b, 0.5);
+        assert!(mid.x > a.x && mid.x < b.x);
+        assert!(mid.y > a.y && mid.y < b.y);
+        assert!(mid.width > a.width && mid.width < b.width);
+        assert!(mid.height > a.height && mid.height < b.height);
+    }
+
+    #[test]
+    fn split_starts_animation_with_captured_old_and_new_rects() {
+        let area = test_area();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        window
+            .split(
+                layout::SplitDirection::Horizontal,
+                "cat",
+                false,
+                &std::env::current_dir().unwrap(),
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let anim = window.active_anim.as_ref().unwrap();
+        assert_eq!(anim.old_rects, vec![(0, area)]);
+        assert_eq!(anim.new_rects.len(), 2);
+
+        window.kill_all().unwrap();
+    }
+
+    #[test]
+    fn tick_animation_clears_active_anim_once_duration_elapses() {
+        let area = test_area();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        window.active_anim = Some(AnimTransition {
+            old_rects: vec![(0, area)],
+            new_rects: vec![(0, area)],
+            closing_ghost_target: None,
+            started: Instant::now() - ANIM_DURATION - Duration::from_millis(10),
+        });
+
+        window.tick_animation();
+        assert!(window.active_anim.is_none());
+
+        window.kill_all().unwrap();
+    }
+
+    #[test]
+    fn closing_ghost_rect_present_then_absent_after_duration() {
+        let area = test_area();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
+        window
+            .split(
+                layout::SplitDirection::Horizontal,
+                "cat",
+                false,
+                &std::env::current_dir().unwrap(),
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        window.close_focused().unwrap();
+
+        assert!(window.closing_ghost_rect().is_some());
+
+        window.active_anim.as_mut().unwrap().started = Instant::now() - ANIM_DURATION - Duration::from_millis(10);
+        assert!(window.closing_ghost_rect().is_none());
+
+        window.kill_all().unwrap();
+    }
+
+    #[test]
+    fn closing_ghost_shrinks_only_width_for_horizontal_split() {
+        let area = test_area();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
+        window
+            .split(
+                layout::SplitDirection::Horizontal,
+                "cat",
+                false,
+                &std::env::current_dir().unwrap(),
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let closing_rect = window
+            .pane_rects()
+            .into_iter()
+            .find(|(id, _)| *id == window.focused)
+            .unwrap()
+            .1;
+
+        window.close_focused().unwrap();
+        window.active_anim.as_mut().unwrap().started = Instant::now() - ANIM_DURATION / 2;
+
+        let ghost = window.closing_ghost_rect().unwrap();
+        assert_eq!(ghost.height, closing_rect.height);
+        assert!(ghost.width < closing_rect.width);
+
+        window.kill_all().unwrap();
+    }
+
+    #[test]
+    fn closing_ghost_shrinks_only_height_for_vertical_split() {
+        let area = test_area();
+        let mut window = Window::new("cat", false, area, &std::env::current_dir().unwrap()).unwrap();
+        window
+            .split(
+                layout::SplitDirection::Vertical,
+                "cat",
+                false,
+                &std::env::current_dir().unwrap(),
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let closing_rect = window
+            .pane_rects()
+            .into_iter()
+            .find(|(id, _)| *id == window.focused)
+            .unwrap()
+            .1;
+
+        window.close_focused().unwrap();
+        window.active_anim.as_mut().unwrap().started = Instant::now() - ANIM_DURATION / 2;
+
+        let ghost = window.closing_ghost_rect().unwrap();
+        assert_eq!(ghost.width, closing_rect.width);
+        assert!(ghost.height < closing_rect.height);
 
         window.kill_all().unwrap();
     }
